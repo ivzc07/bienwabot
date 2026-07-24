@@ -1,0 +1,7 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnUpdates": true,
+  "includeIssuesTable": true,
+  "instructions": "Tag every inline comment with a severity prefix: [P1] for bugs or correctness issues that must be fixed before merge, [P2] for issues that should be fixed, [P3] for optional improvements. Prioritize correctness bugs, broken imports, and test coverage gaps over style."
+}
