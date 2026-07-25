@@ -8,7 +8,6 @@ how the guard survives a restart mid-storm.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -20,18 +19,7 @@ from rebe_agent.guard import (
     DailyCallCeilingError,
 )
 from rebe_agent.usage import CallType, CallUsage, DayTotals, InMemoryUsageStore
-
-MEXICO_CITY = ZoneInfo("America/Mexico_City")
-NOON = datetime(2026, 7, 25, 12, 0, tzinfo=MEXICO_CITY)
-TODAY = NOON.date()
-
-
-class RecordingAlerter:
-    def __init__(self) -> None:
-        self.messages: list[str] = []
-
-    async def alert(self, message: str) -> None:
-        self.messages.append(message)
+from tests.support import MEXICO_CITY, NOON, TODAY, RecordingAlerter
 
 
 @pytest.fixture
