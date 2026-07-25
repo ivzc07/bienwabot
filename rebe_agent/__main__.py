@@ -44,9 +44,13 @@ def _configure_logging(level: int | str = logging.INFO) -> None:
 def apply_timezone(name: str) -> None:
     """Make the process's local time match the configured zone.
 
-    `ZoneInfo` already carries the zone everywhere it matters; this aligns
-    anything that reads local time the POSIX way (log timestamps, libraries
-    calling `localtime`). `tzset` is POSIX-only, so it is skipped elsewhere.
+    A `Clock` already carries the zone everywhere the agent reasons about time;
+    this aligns anything that reads local time the POSIX way (log timestamps,
+    libraries calling `localtime`). `tzset` is POSIX-only, so it is skipped
+    elsewhere.
+
+    Process-global by nature, so only the serving path calls it: `--check-config`
+    and the tests leave the ambient environment alone.
     """
     os.environ["TZ"] = name
     tzset = getattr(time, "tzset", None)
@@ -72,6 +76,7 @@ def run(settings: Settings, clock: Clock) -> int:
     The webhook leg and the news leg land in later tickets; this skeleton only
     has to boot, stay up, and shut down cleanly on SIGTERM.
     """
+    apply_timezone(settings.timezone)
     stopping = threading.Event()
 
     def _stop(signum: int, _frame: FrameType | None) -> None:
@@ -97,7 +102,6 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         logger.error("rebe-agent cannot start. %s", exc)
         return EXIT_BAD_CONFIG
 
-    apply_timezone(settings.timezone)
     _configure_logging(settings.log_level)
 
     clock = SystemClock(settings.zone)

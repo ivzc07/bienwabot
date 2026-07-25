@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from rebe_agent.config import REQUIRED_VARIABLES, MissingConfigurationError, Settings, load_settings
+from rebe_agent.config import (
+    REQUIRED_VARIABLES,
+    InvalidConfigurationError,
+    MissingConfigurationError,
+    Settings,
+    load_settings,
+)
 
 COMPLETE_ENV = {
     "DEEPSEEK_API_KEY": "sk-deepseek-test",
@@ -99,6 +107,28 @@ def test_the_deployment_spec_secrets_table_is_covered() -> None:
     }
 
     assert spec_table <= set(Settings.variable_names())
+
+
+def test_env_example_documents_exactly_what_the_process_reads() -> None:
+    """`.env.example` is the operator's copy of `Settings`; drift breaks deploys."""
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    documented = {
+        line.split("=", 1)[0].strip()
+        for line in example.read_text(encoding="utf-8").splitlines()
+        if "=" in line and not line.lstrip().startswith("#")
+    }
+
+    assert documented == set(Settings.variable_names())
+
+
+def test_an_invalid_variable_is_reported_with_its_reason(env: dict[str, str]) -> None:
+    env["TZ"] = "Mars/Olympus_Mons"
+
+    with pytest.raises(InvalidConfigurationError) as caught:
+        load_settings(env)
+
+    assert "TZ" in caught.value.problems
+    assert "IANA" in caught.value.problems["TZ"]
 
 
 def test_an_unparseable_url_is_rejected(env: dict[str, str]) -> None:
