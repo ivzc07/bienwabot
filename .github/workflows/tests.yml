@@ -13,6 +13,25 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # The call counters and the token totals live in Postgres, and "survives a
+    # restart" is only worth asserting against a real one.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: rebe
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      REBE_TEST_DATABASE_URL: postgresql://postgres:rebe@127.0.0.1:5432/postgres
+
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -31,7 +50,12 @@ jobs:
       - name: Typecheck
         run: mypy
       - name: Test
-        run: pytest -q
+        # The database tests skip when REBE_TEST_DATABASE_URL is unset, and a
+        # gate that silently skips is worse than no gate - so fail first if the
+        # service wiring above ever goes missing.
+        run: |
+          test -n "$REBE_TEST_DATABASE_URL"
+          pytest -q -rs
 
       # The container is part of the deliverable, so the one required check
       # covers it too: it must build, boot, stay up, and refuse to start
@@ -74,6 +98,11 @@ jobs:
           # And the process's own local time, not just the agent's clock.
           docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
             -c 'import time; print("os_local", time.strftime("%z"))' | grep -q 'os_local -0600'
+      - name: The brain's dependencies are in the image, not just in CI's venv
+        run: |
+          docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
+            -c 'import rebe_agent.brain as b; print("model", b.DEEPSEEK_MODEL)' \
+            | grep -q 'model deepseek-v4-flash'
       - name: Refuse to boot with a required variable missing
         run: |
           grep -v '^DEEPSEEK_API_KEY=' .env.ci > .env.broken
