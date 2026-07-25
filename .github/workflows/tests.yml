@@ -103,6 +103,15 @@ jobs:
           docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
             -c 'import rebe_agent.brain as b; print("model", b.DEEPSEEK_MODEL)' \
             | grep -q 'model deepseek-v4-flash'
+
+      # Same for the send path: the pacer is what every message leaves through,
+      # so an image that cannot import it is an image that cannot post.
+      - name: The pacer is in the image, with the shipped envelope
+        run: |
+          docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
+            -c 'from rebe_agent.pacer import Envelope; e = Envelope(); print("envelope", e.sends_per_minute, e.sends_per_hour, e.sends_per_day)' \
+            | grep -q 'envelope 4 3 12'
+          docker run --rm --env-file .env.ci rebe-agent:ci --help | grep -q -- '--say'
       - name: Refuse to boot with a required variable missing
         run: |
           grep -v '^DEEPSEEK_API_KEY=' .env.ci > .env.broken

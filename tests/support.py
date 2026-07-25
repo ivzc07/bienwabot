@@ -12,6 +12,9 @@ NOON = datetime(2026, 7, 25, 12, 0, tzinfo=MEXICO_CITY)
 
 TODAY = NOON.date()
 
+GROUP = "120363000000000000@g.us"
+"""The bien.mx group, as far as any test is concerned."""
+
 
 class RecordingAlerter:
     """Keeps what would have gone to the maintainer, so a test can read it."""

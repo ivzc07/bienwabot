@@ -1,6 +1,9 @@
 """Boot: load configuration, prove it, then hand off to the run loop.
 
-Exit codes: 0 clean stop, 2 unusable configuration, 3 the brain gave no answer.
+Exit codes: 0 clean stop, 2 unusable configuration, 3 the brain gave no answer,
+4 the pacer refused the send, 5 Evolution would not take it. The last two are
+separate on purpose: "not now" and "broken" want different reactions from
+whoever is watching.
 """
 
 from __future__ import annotations
@@ -19,11 +22,16 @@ from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
+from rebe_agent.evolution import EvolutionError, build_client
+from rebe_agent.pacer import Pacer, SendRefusedError
+from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
 
 EXIT_OK = 0
 EXIT_BAD_CONFIG = 2
 EXIT_CALL_FAILED = 3
+EXIT_SEND_REFUSED = 4
+EXIT_SEND_FAILED = 5
 
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
 
@@ -45,7 +53,34 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "as JSON, and exit. The call is counted and its tokens recorded like any other."
         ),
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--say",
+        metavar="TEXT",
+        help=(
+            "Send one message through the shared pacer and exit. Requires --to. "
+            "Typing presence, the jittered delay and every ceiling apply, so this "
+            "is the real send path rather than a shortcut around it."
+        ),
+    )
+    parser.add_argument(
+        "--to",
+        metavar="JID",
+        help="Where --say sends: a WhatsApp group or contact JID, for example 1203...@g.us.",
+    )
+    parser.add_argument(
+        "--as",
+        dest="kind",
+        choices=[str(kind) for kind in SendKind],
+        default=str(SendKind.POST),
+        help=(
+            "Which leg --say pretends to be. Posts are held overnight and spaced "
+            "75-90 minutes apart; replies are not. Default: post."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if args.say and not args.to:
+        parser.error("--say needs --to <JID> to know where to send")
+    return args
 
 
 def _configure_logging(level: int | str = logging.INFO) -> None:
@@ -114,6 +149,33 @@ async def ask_once(settings: Settings, clock: Clock, prompt: str) -> int:
     return EXIT_OK
 
 
+async def say_once(settings: Settings, clock: Clock, chat: str, text: str, kind: SendKind) -> int:
+    """One message into a real group, through the real pacer.
+
+    The smallest end-to-end proof that the send path works: the group sees the
+    typing indicator, the pause is drawn rather than fixed, the send is written
+    to the `rebe` database before it goes on the wire, and the envelope gets its
+    say. A refusal and a transport failure exit differently, because "come back
+    in forty minutes" and "Evolution is down" are not the same news.
+    """
+    async with (
+        PostgresSendLog.connect(settings.rebe_database_url.get_secret_value()) as log,
+        build_client(settings) as client,
+    ):
+        pacer = Pacer(client, log, clock)
+        try:
+            # The pacer logs the send it made; there is one event here, not two.
+            await pacer.send(kind, chat, text)
+        except SendRefusedError as exc:
+            logger.error("the pacer refused the send. %s", exc)
+            return EXIT_SEND_REFUSED
+        except EvolutionError as exc:
+            logger.error("the message did not get out. %s", exc)
+            return EXIT_SEND_FAILED
+
+    return EXIT_OK
+
+
 def run(settings: Settings, clock: Clock) -> int:
     """Hold the process open until the platform stops it.
 
@@ -157,6 +219,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 
     if args.ask:
         return asyncio.run(ask_once(settings, clock, args.ask))
+
+    if args.say:
+        return asyncio.run(say_once(settings, clock, args.to, args.say, SendKind(args.kind)))
 
     return run(settings, clock)
 

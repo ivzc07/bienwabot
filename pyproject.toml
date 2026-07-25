@@ -12,6 +12,11 @@ dependencies = [
     # The typed-output agent library from #4. `-slim[openai]` is the DeepSeek
     # path: Pydantic + the openai client, no web server, no database.
     "pydantic-ai-slim[openai]>=2.18",
+    # Talking to Evolution API, and the seam the tests serve their stub through.
+    # Already here transitively via the openai client; named because this code
+    # imports it directly, and an undeclared import is a dependency you do not
+    # control the version of.
+    "httpx>=0.27",
     # The `rebe` state store. `binary` avoids a compiler in the image; `pool`
     # keeps one small connection pool alive instead of dialling per write.
     "psycopg[binary,pool]>=3.2",
