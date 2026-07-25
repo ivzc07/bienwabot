@@ -16,6 +16,7 @@ memory, so a restart mid-storm does not hand the loop a fresh allowance.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -81,10 +82,11 @@ class CallRateGuard:
         self._alerter = alerter
         self._alert_threshold = alert_threshold
         self._stop_threshold = stop_threshold
-
-    @property
-    def stop_threshold(self) -> int:
-        return self._stop_threshold
+        # Reading the day's count and adding to it is two statements, and both
+        # legs share this guard inside one process (the single-replica invariant
+        # in the deployment spec). Without the lock, a webhook and a news tick
+        # landing together could both read 1,999 and both call.
+        self._turnstile = asyncio.Lock()
 
     async def reserve(self, call_type: CallType) -> Reservation:
         """Count one call, or refuse the day.
@@ -92,19 +94,21 @@ class CallRateGuard:
         Raises `DailyCallCeilingError` when the day is already spent, which the
         brain turns into a failed call and the caller turns into silence.
         """
-        day = self._clock.now().date()
+        async with self._turnstile:
+            day = self._clock.now().date()
 
-        before = await self._store.calls_on(day)
-        if before >= self._stop_threshold:
-            logger.warning(
-                "DeepSeek call refused: %s calls already made on %s (ceiling %s)",
-                before,
-                day.isoformat(),
-                self._stop_threshold,
-            )
-            raise DailyCallCeilingError(day, before, self._stop_threshold)
+            before = await self._store.calls_on(day)
+            if before >= self._stop_threshold:
+                logger.warning(
+                    "DeepSeek call refused: %s calls already made on %s (ceiling %s)",
+                    before,
+                    day.isoformat(),
+                    self._stop_threshold,
+                )
+                raise DailyCallCeilingError(day, before, self._stop_threshold)
 
-        after = await self._store.record_call(day, call_type)
+            after = await self._store.record_call(day, call_type)
+
         await self._announce_crossings(day, before, after)
         return Reservation(day=day, call_type=call_type, calls_today=after)
 

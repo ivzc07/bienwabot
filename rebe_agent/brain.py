@@ -201,10 +201,11 @@ class Brain:
         *,
         instructions: str | None = None,
         message_history: Sequence[ModelMessage] | None = None,
-        max_tokens: int | None = None,
-        temperature: float | None = None,
     ) -> OutputT:
         """Ask DeepSeek for one `output_type`, or raise.
+
+        The cap and the temperature come from the call type's shape rather than
+        from the caller, so there is no way to make an uncapped call.
 
         `retries=0` is what makes "a response that fails schema validation is a
         failure" true: Pydantic AI would otherwise hand the model its own error
@@ -213,8 +214,8 @@ class Brain:
         """
         shape = CALL_SHAPES[call_type]
         settings = OpenAIChatModelSettings(
-            max_tokens=max_tokens if max_tokens is not None else shape.max_tokens,
-            temperature=temperature if temperature is not None else shape.temperature,
+            max_tokens=shape.max_tokens,
+            temperature=shape.temperature,
             extra_body=dict(THINKING_DISABLED),
         )
 
@@ -229,17 +230,25 @@ class Brain:
             instructions=instructions,
             retries=0,
         )
+        # Pydantic AI accumulates into this as the run goes, so the tokens
+        # DeepSeek billed are still readable when the run ends in an exception.
+        # A call that fails is a call that cost money; leaving it out of the
+        # totals would understate exactly the days worth understanding.
+        tally = RunUsage()
         try:
             result = await agent.run(
                 prompt,
                 model_settings=settings,
                 message_history=list(message_history) if message_history else None,
+                usage=tally,
             )
         except Exception as exc:
             logger.warning("DeepSeek %s call failed: %s", call_type, exc)
             raise BrainCallError(f"{call_type} call failed: {exc}") from exc
+        finally:
+            if tally.requests:
+                await self._guard.record_usage(reservation, usage_from_run(tally))
 
-        await self._guard.record_usage(reservation, usage_from_run(result.usage))
         return result.output
 
 
