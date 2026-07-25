@@ -7,10 +7,17 @@ Tuesday without waiting for Tuesday.
 
 `zone` is always a `tzinfo` object; the string name it came from lives on
 `Settings.timezone`.
+
+*Waiting* is the same problem in the other direction. The pacer spends most of
+its life asleep - a typing pause, a beat before a first message, a minute window
+draining - and a test that asserted those by actually waiting would be a slow
+test that proves nothing about the numbers. So sleeping goes through a `Sleeper`
+too, and a test hands it one that moves a `ManualClock` instead of the world.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Protocol
@@ -65,3 +72,37 @@ class ManualClock:
     def set(self, instant: datetime) -> None:
         """Place the clock at an exact instant."""
         self._instant = self._normalise(instant)
+
+
+class Sleeper(Protocol):
+    """A way to wait, so that waiting can be replaced in a test."""
+
+    async def sleep(self, seconds: float) -> None:
+        """Wait roughly `seconds`. A non-positive value waits not at all."""
+
+
+class RealSleeper:
+    """The real wait. Yields to the event loop, so the other leg keeps running."""
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds > 0:
+            await asyncio.sleep(seconds)
+
+
+class ManualSleeper:
+    """Moves a `ManualClock` forward instead of waiting, and remembers by how much."""
+
+    def __init__(self, clock: ManualClock) -> None:
+        self._clock = clock
+        self.slept: list[float] = []
+
+    @property
+    def total(self) -> float:
+        """Every second this would have spent waiting."""
+        return sum(self.slept)
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        self.slept.append(seconds)
+        self._clock.advance(timedelta(seconds=seconds))

@@ -19,13 +19,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Protocol
 
-import psycopg
-from psycopg_pool import AsyncConnectionPool
-
-Pool = AsyncConnectionPool[psycopg.AsyncConnection[tuple[Any, ...]]]
-"""The pool psycopg hands back with its default (tuple) row factory."""
+from rebe_agent.db import Pool, open_pool
 
 
 class CallType(StrEnum):
@@ -170,14 +166,8 @@ class PostgresUsageStore:
     @classmethod
     @asynccontextmanager
     async def connect(cls, database_url: str) -> AsyncIterator[PostgresUsageStore]:
-        """Open a small pool, make sure the table exists, and hand back a store.
-
-        The pool is deliberately tiny: this is a few writes a minute from one
-        replica, and it shares Postgres with Evolution.
-        """
-        async with AsyncConnectionPool(
-            database_url, min_size=1, max_size=2, open=False
-        ) as pool:  # pragma: no branch
+        """Open a small pool, make sure the table exists, and hand back a store."""
+        async with open_pool(database_url) as pool:
             store = cls(pool)
             await store.ensure_schema()
             yield store
