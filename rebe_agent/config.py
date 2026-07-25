@@ -21,6 +21,7 @@ LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
 
 DEFAULT_TIMEZONE = "America/Mexico_City"
 DEFAULT_INSTANCE = "bien-rebe"
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 
 class ConfigurationError(ValueError):
@@ -66,6 +67,7 @@ class Settings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=False)
 
     deepseek_api_key: SecretStr = Field(alias="DEEPSEEK_API_KEY")
+    deepseek_base_url: str = Field(default=DEFAULT_DEEPSEEK_BASE_URL, alias="DEEPSEEK_BASE_URL")
     evolution_api_url: str = Field(alias="EVOLUTION_API_URL")
     evolution_api_key: SecretStr = Field(alias="EVOLUTION_API_KEY")
     evolution_instance: str = Field(default=DEFAULT_INSTANCE, alias="EVOLUTION_INSTANCE")
@@ -77,7 +79,7 @@ class Settings(BaseModel):
     timezone: str = Field(default=DEFAULT_TIMEZONE, alias="TZ")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
-    @field_validator("evolution_api_url", "kuma_push_url")
+    @field_validator("evolution_api_url", "kuma_push_url", "deepseek_base_url")
     @classmethod
     def _check_url(cls, value: str) -> str:
         return _absolute_url(value)

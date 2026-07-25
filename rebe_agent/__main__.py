@@ -1,11 +1,12 @@
 """Boot: load configuration, prove it, then hand off to the run loop.
 
-Exit codes: 0 clean stop, 2 unusable configuration.
+Exit codes: 0 clean stop, 2 unusable configuration, 3 the brain gave no answer.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import signal
@@ -15,11 +16,14 @@ from collections.abc import Mapping, Sequence
 from types import FrameType
 
 from rebe_agent import __version__
+from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
+from rebe_agent.usage import CallType, PostgresUsageStore
 
 EXIT_OK = 0
 EXIT_BAD_CONFIG = 2
+EXIT_CALL_FAILED = 3
 
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
 
@@ -32,6 +36,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--check-config",
         action="store_true",
         help="Validate the environment, log the startup line, and exit without serving.",
+    )
+    parser.add_argument(
+        "--ask",
+        metavar="PROMPT",
+        help=(
+            "Send one prompt through the DeepSeek brain, print the validated answer "
+            "as JSON, and exit. The call is counted and its tokens recorded like any other."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -68,6 +80,38 @@ def log_startup(settings: Settings, clock: Clock) -> None:
         settings.timezone,
         clock.now().isoformat(timespec="seconds"),
     )
+
+
+async def ask_once(settings: Settings, clock: Clock, prompt: str) -> int:
+    """One prompt through the real brain, printed as a validated typed object.
+
+    This is the smallest end-to-end proof that the wiring works: the model ID,
+    the disabled thinking mode, the token cap, the schema, the counter, and the
+    `rebe` database all take part in one command.
+    """
+    async with PostgresUsageStore.connect(settings.rebe_database_url.get_secret_value()) as store:
+        brain = build_brain(settings, clock, store)
+        try:
+            answer = await brain.ask(CallType.PROBE, prompt, Probe)
+        except BrainError as exc:
+            logger.error("the brain returned no answer. %s", exc)
+            return EXIT_CALL_FAILED
+
+        print(answer.model_dump_json(indent=2))
+
+        day = clock.now().date()
+        totals = (await store.totals_on(day)).get(CallType.PROBE)
+        if totals is not None:
+            logger.info(
+                "usage on %s for %s: calls=%d cache_hit=%d cache_miss=%d completion=%d",
+                day.isoformat(),
+                CallType.PROBE,
+                totals.calls,
+                totals.cache_hit_tokens,
+                totals.cache_miss_tokens,
+                totals.completion_tokens,
+            )
+    return EXIT_OK
 
 
 def run(settings: Settings, clock: Clock) -> int:
@@ -110,6 +154,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     if args.check_config:
         logger.info("configuration is complete and valid")
         return EXIT_OK
+
+    if args.ask:
+        return asyncio.run(ask_once(settings, clock, args.ask))
 
     return run(settings, clock)
 
