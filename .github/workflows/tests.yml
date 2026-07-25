@@ -5,6 +5,11 @@ on:
   push:
     branches: [main]
 
+defaults:
+  run:
+    # -o pipefail so a failure on the left of a pipe fails the step.
+    shell: bash -euo pipefail {0}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -29,26 +34,46 @@ jobs:
         run: pytest -q
 
       # The container is part of the deliverable, so the one required check
-      # covers it too: it must build, boot, and refuse to boot half-configured.
+      # covers it too: it must build, boot, stay up, and refuse to start
+      # half-configured.
       - name: Build the container image
         run: docker build -t rebe-agent:ci .
       - name: Write a throwaway environment
+        # Generated from .env.example so the variable list has one home. Blank
+        # values there are secrets; any placeholder does for a config check.
         run: |
-          cat > .env.ci <<'EOF'
-          DEEPSEEK_API_KEY=ci-not-a-real-key
-          EVOLUTION_API_URL=http://bien-evo-api:8080
-          EVOLUTION_API_KEY=ci-not-a-real-key
-          WEBHOOK_SECRET=ci-not-a-real-secret
-          REBE_DATABASE_URL=postgresql://rebe:ci@bien-evo-pg:5432/rebe
-          TELEGRAM_BOT_TOKEN=ci-not-a-real-token
-          TELEGRAM_CHAT_ID=-1000000000000
-          KUMA_PUSH_URL=http://kuma:3001/api/push/ci
-          EOF
+          grep -E '^[A-Z][A-Z0-9_]*=' .env.example \
+            | sed -e 's/^\([A-Z][A-Z0-9_]*\)=$/\1=ci-placeholder/' \
+                  -e 's/CHANGE_ME/ci-placeholder/' \
+            > .env.ci
+          cat .env.ci
       - name: Boot with a complete environment
         run: |
-          docker run --rm --env-file .env.ci rebe-agent:ci --check-config 2>&1 | tee boot.log
-          grep -q "evolution_instance=bien-rebe" boot.log
-          grep -q "timezone=America/Mexico_City" boot.log
+          docker run --rm --env-file .env.ci rebe-agent:ci --check-config > boot.log 2>&1
+          cat boot.log
+          grep -q 'evolution_instance=bien-rebe' boot.log
+          grep -q 'timezone=America/Mexico_City' boot.log
+      - name: Stay up, then stop cleanly on SIGTERM
+        run: |
+          id=$(docker run -d --env-file .env.ci rebe-agent:ci)
+          sleep 3
+          test "$(docker inspect -f '{{.State.Running}}' "$id")" = "true"
+          docker stop -t 15 "$id" > /dev/null
+          docker logs "$id"
+          test "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = "0"
+          docker rm "$id" > /dev/null
+      - name: Local time follows TZ
+        # Proves the value flows env -> settings -> clock, rather than the image
+        # baking one timezone in: an override has to change the logged offset.
+        run: |
+          docker run --rm --env-file .env.ci rebe-agent:ci --check-config > default_tz.log 2>&1
+          grep -q 'local_time=.*-06:00' default_tz.log
+          docker run --rm --env-file .env.ci -e TZ=UTC rebe-agent:ci --check-config > utc.log 2>&1
+          grep -q 'timezone=UTC' utc.log
+          grep -q 'local_time=.*+00:00' utc.log
+          # And the process's own local time, not just the agent's clock.
+          docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
+            -c 'import time; print("os_local", time.strftime("%z"))' | grep -q 'os_local -0600'
       - name: Refuse to boot with a required variable missing
         run: |
           grep -v '^DEEPSEEK_API_KEY=' .env.ci > .env.broken
@@ -57,4 +82,5 @@ jobs:
             cat broken.log
             exit 1
           fi
-          grep -q "DEEPSEEK_API_KEY" broken.log
+          cat broken.log
+          grep -q 'DEEPSEEK_API_KEY' broken.log

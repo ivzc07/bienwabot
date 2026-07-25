@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from rebe_agent.clock import Clock, ManualClock, SystemClock, is_quiet_hours
+from rebe_agent.clock import ManualClock, SystemClock
 
 MEXICO_CITY = ZoneInfo("America/Mexico_City")
 
@@ -16,7 +16,7 @@ def test_the_system_clock_answers_in_its_configured_zone() -> None:
     clock = SystemClock(MEXICO_CITY)
 
     assert clock.now().tzinfo is MEXICO_CITY
-    assert clock.timezone is MEXICO_CITY
+    assert clock.zone is MEXICO_CITY
 
 
 def test_the_system_clock_tracks_utc() -> None:
@@ -60,19 +60,13 @@ def test_a_manual_clock_refuses_to_go_backwards() -> None:
         clock.advance(timedelta(minutes=-1))
 
 
-@pytest.mark.parametrize(
-    ("hour", "quiet"),
-    [(1, False), (2, True), (4, True), (5, True), (6, False), (14, False), (23, False)],
-)
-def test_quiet_hours_span_02_00_to_06_00_local(hour: int, quiet: bool) -> None:
-    clock: Clock = ManualClock(datetime(2026, 7, 25, hour, 0, tzinfo=MEXICO_CITY))
+def test_the_local_hour_is_read_in_the_clocks_zone_not_utc() -> None:
+    """One instant, two zones: 09:00 UTC is 03:00 in Mexico City.
 
-    assert is_quiet_hours(clock) is quiet
+    This is what keeps quiet hours and the posting shape honest once the pacer
+    lands - they ask a clock for the local hour, never `datetime.now()`.
+    """
+    instant = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
 
-
-def test_quiet_hours_are_judged_in_the_configured_zone_not_utc() -> None:
-    """09:00 UTC is 03:00 in Mexico City - quiet there, wide awake in UTC."""
-    utc_morning = datetime(2026, 7, 25, 9, 0, tzinfo=UTC)
-
-    assert is_quiet_hours(ManualClock(utc_morning, tz=MEXICO_CITY)) is True
-    assert is_quiet_hours(ManualClock(utc_morning, tz=UTC)) is False
+    assert ManualClock(instant, tz=MEXICO_CITY).now().hour == 3
+    assert ManualClock(instant, tz=UTC).now().hour == 9

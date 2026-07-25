@@ -1,8 +1,8 @@
 """The one place this process reads its environment.
 
 Every secret and setting in section 4 of `docs/wayfinder/deployment-architecture-spec.md`
-lands in `Settings`. Nothing else in the codebase touches `os.environ`: call
-`load_settings()` once at boot and pass the result down.
+lands in `Settings`. This module is the only place the codebase *reads* the
+environment: call `load_settings()` once at boot and pass the result down.
 
 A missing or malformed variable raises `ConfigurationError` naming the variable,
 so the container dies at boot with a readable reason rather than at first use.
@@ -119,25 +119,17 @@ class Settings(BaseModel):
 
     @property
     def zone(self) -> ZoneInfo:
-        """The configured timezone, ready to hand to a clock."""
+        """The configured timezone as a `tzinfo`, ready to hand to a clock."""
         return ZoneInfo(self.timezone)
 
     @classmethod
     def variable_names(cls) -> tuple[str, ...]:
         """Every environment variable this process reads, in declaration order."""
-        return tuple(
-            field.alias or name for name, field in cls.model_fields.items() if field.alias or name
-        )
+        return tuple(field.alias or name for name, field in cls.model_fields.items())
 
 
 REQUIRED_VARIABLES: tuple[str, ...] = tuple(
-    field.alias or name
-    for name, field in Settings.model_fields.items()
-    if field.is_required() and (field.alias or name)
-)
-
-OPTIONAL_VARIABLES: tuple[str, ...] = tuple(
-    name for name in Settings.variable_names() if name not in REQUIRED_VARIABLES
+    field.alias or name for name, field in Settings.model_fields.items() if field.is_required()
 )
 
 
