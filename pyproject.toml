@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rebe-agent"
+version = "0.1.0"
+description = "Rebe, the bien.mx WhatsApp news agent."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    # Ships the IANA zone database with the app, so America/Mexico_City resolves
+    # even on a host or slim image that carries no system tzdata.
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.2",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+rebe-agent = "rebe_agent.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["rebe_agent*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Planning docs and agent config are prose, not source; keep the linter off them.
+extend-exclude = ["docs", ".agents", ".claude"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["rebe_agent", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
