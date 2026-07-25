@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 import pytest
 from pydantic import BaseModel
 
@@ -21,11 +18,8 @@ from rebe_agent.config import Settings, load_settings
 from rebe_agent.guard import STOP_THRESHOLD
 from rebe_agent.usage import CallType, DayTotals, InMemoryUsageStore
 from tests.deepseek_stub import FakeDeepSeek, tool_call_response
+from tests.support import NOON, TODAY, RecordingAlerter
 from tests.test_config import COMPLETE_ENV
-
-MEXICO_CITY = ZoneInfo("America/Mexico_City")
-NOON = datetime(2026, 7, 25, 12, 0, tzinfo=MEXICO_CITY)
-TODAY = NOON.date()
 
 
 class NewsPost(BaseModel):
@@ -37,14 +31,6 @@ class NewsPost(BaseModel):
 
 
 VALID_POST = '{"framing": "Ojo", "line": "Sale un modelo nuevo.", "url": "https://x.mx/a"}'
-
-
-class RecordingAlerter:
-    def __init__(self) -> None:
-        self.messages: list[str] = []
-
-    async def alert(self, message: str) -> None:
-        self.messages.append(message)
 
 
 @pytest.fixture
@@ -99,14 +85,22 @@ async def test_the_request_explicitly_disables_thinking(
 async def test_the_sampling_knobs_the_persona_needs_are_sent(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
-    """Only meaningful because thinking is off; thinking mode ignores these."""
+    """Only meaningful because thinking is off; thinking mode ignores these.
+
+    A loose voice for the prose calls and a repeatable one for the gates, so the
+    two must not arrive at DeepSeek as the same number.
+    """
     fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    brain = brain_for(settings, fake, store)
 
-    await brain_for(settings, fake, store).ask(
-        CallType.REPLY_GENERATION, "contesta", NewsPost, temperature=0.9
-    )
+    await brain.ask(CallType.REPLY_GENERATION, "contesta", NewsPost)
+    loose = fake.last_request["temperature"]
+    await brain.ask(CallType.REPLY_GATE, "clasifica", NewsPost)
+    tight = fake.last_request["temperature"]
 
-    assert fake.last_request["temperature"] == 0.9
+    assert loose == CALL_SHAPES[CallType.REPLY_GENERATION].temperature
+    assert tight == CALL_SHAPES[CallType.REPLY_GATE].temperature
+    assert loose > tight
 
 
 async def test_every_call_carries_a_max_tokens(
@@ -123,16 +117,19 @@ async def test_every_call_carries_a_max_tokens(
         assert "max_completion_tokens" not in body
 
 
-async def test_an_explicit_max_tokens_overrides_the_call_shape(
+async def test_a_caller_cannot_ask_for_an_uncapped_call(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
+    """The cap is the call type's, not the caller's; there is no knob to forget."""
     fake = FakeDeepSeek(tool_call_response(VALID_POST))
 
-    await brain_for(settings, fake, store).ask(
-        CallType.NEWS_SUMMARY, "resume", NewsPost, max_tokens=64
-    )
-
-    assert fake.last_request["max_tokens"] == 64
+    with pytest.raises(TypeError):
+        await brain_for(settings, fake, store).ask(
+            CallType.NEWS_SUMMARY,
+            "resume",
+            NewsPost,
+            max_tokens=None,  # type: ignore[call-arg]
+        )
 
 
 async def test_the_current_non_thinking_model_is_used(
@@ -166,6 +163,44 @@ async def test_a_validation_failure_is_not_retried_into_a_second_billed_call(
 
     assert len(fake.requests) == 1
     assert await store.calls_on(TODAY) == 1
+
+
+async def test_a_failed_call_still_books_the_tokens_it_was_billed_for(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """A call that fails validation was still generated, and still cost money."""
+    fake = FakeDeepSeek(
+        tool_call_response(
+            '{"framing": "Ojo"}',
+            usage={
+                "prompt_tokens": 1000,
+                "completion_tokens": 150,
+                "total_tokens": 1150,
+                "prompt_cache_hit_tokens": 700,
+                "prompt_cache_miss_tokens": 300,
+            },
+        )
+    )
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    assert (await store.totals_on(TODAY))[CallType.NEWS_SUMMARY] == DayTotals(
+        calls=1, cache_hit_tokens=700, cache_miss_tokens=300, completion_tokens=150
+    )
+
+
+async def test_a_call_that_never_reached_deepseek_books_no_tokens(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    fake = FakeDeepSeek(500)
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    totals = (await store.totals_on(TODAY))[CallType.NEWS_SUMMARY]
+    assert totals.calls == 1
+    assert totals.completion_tokens == 0
 
 
 async def test_a_transport_failure_surfaces_to_the_caller(

@@ -47,7 +47,9 @@ class CallType(StrEnum):
     """D: borderline news candidate, keep or drop."""
 
     PROBE = "probe"
-    """Not a product call: the `--ask` smoke test, kept out of the real totals."""
+    """The `--ask` smoke test. Its own row, so it never muddies the four real
+    call types, but counted toward the day's ceiling like everything else - a
+    loop of probes is still a loop."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +153,9 @@ CREATE TABLE IF NOT EXISTS deepseek_usage (
 )
 """
 
+CALLS_ON_DAY = "SELECT COALESCE(SUM(calls), 0) FROM deepseek_usage WHERE day = %s"
+"""The day's total across every call type - what the ceiling is measured against."""
+
 
 class PostgresUsageStore:
     """The real store: one table in the `rebe` database from the deployment spec.
@@ -191,9 +196,7 @@ class PostgresUsageStore:
                 """,
                 (day, str(call_type)),
             )
-            cursor = await conn.execute(
-                "SELECT COALESCE(SUM(calls), 0) FROM deepseek_usage WHERE day = %s", (day,)
-            )
+            cursor = await conn.execute(CALLS_ON_DAY, (day,))
             row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
@@ -222,9 +225,7 @@ class PostgresUsageStore:
 
     async def calls_on(self, day: date) -> int:
         async with self._pool.connection() as conn:
-            cursor = await conn.execute(
-                "SELECT COALESCE(SUM(calls), 0) FROM deepseek_usage WHERE day = %s", (day,)
-            )
+            cursor = await conn.execute(CALLS_ON_DAY, (day,))
             row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
