@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
+from rebe_agent.alerts import Signal
 from rebe_agent.brain import (
     CALL_SHAPES,
     DEEPSEEK_MODEL,
@@ -210,6 +211,41 @@ async def test_a_transport_failure_surfaces_to_the_caller(
 
     with pytest.raises(BrainCallError):
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+
+async def test_a_failed_call_tells_the_maintainer_out_of_band(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The group is told nothing - the item is dropped, which is the fail-silent
+    rule of the reply policy - so the maintainer has to hear about it somewhere,
+    and Telegram is the somewhere."""
+    alerter = RecordingAlerter()
+    fake = FakeDeepSeek(500)
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store, alerter).ask(
+            CallType.NEWS_SUMMARY, "resume", NewsPost
+        )
+
+    (alert,) = alerter.messages
+    assert Signal.BRAIN_ERROR in alert
+    assert CallType.NEWS_SUMMARY in alert
+
+
+async def test_the_days_ceiling_is_not_alerted_twice_over(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The guard already says the day is spent, in its own words. A second alert
+    calling the same thing a DeepSeek error would be noise about nothing broken."""
+    alerter = RecordingAlerter()
+    store.seed(TODAY, CallType.NEWS_SUMMARY, DayTotals(calls=STOP_THRESHOLD))
+
+    with pytest.raises(BrainStoppedError):
+        await brain_for(settings, FakeDeepSeek(), store, alerter).ask(
+            CallType.NEWS_SUMMARY, "resume", NewsPost
+        )
+
+    assert not any(Signal.BRAIN_ERROR in alert for alert in alerter.messages)
 
 
 async def test_reported_usage_is_persisted_per_day_and_call_type(

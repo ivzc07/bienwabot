@@ -4,7 +4,7 @@ Rebe, the bien.mx WhatsApp news agent.
 One Python process, one replica, two triggers (an Evolution webhook and a scheduled news leg) and one shared pacer.
 
 The design lives in `docs/wayfinder/`; `deployment-architecture-spec.md` is the map.
-This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, the shared pacer both legs send through, and the news leg itself.
+This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, the shared pacer both legs send through, the news leg itself, and the ops channel that alerts a human and can silence her.
 The news leg runs on demand; putting it on a timer is the cadence ticket, and the webhook leg lands in a later one.
 
 ## Running it
@@ -53,6 +53,7 @@ The pacer will also say no.
 Four sends a minute, three an hour, twelve a day, counted across both legs; scheduled posts held between 23:00 and 08:00; consecutive posts 75-90 minutes apart; between 02:00 and 06:00 everything spaced four to six times further apart than by day; and never the same wording twice in a row.
 Every jittered gap is read off the send it is measured against rather than drawn fresh, because a threshold redrawn on each attempt is one a caller can retry its way past - which would quietly turn "75 to 90 minutes" into a flat 75.
 A refusal is a `SendRefusedError` carrying a reason and, where it is knowable, how long until the door opens - so a caller can tell "come back in forty minutes" from "Evolution is down", which is an `EvolutionError` instead.
+The out-of-band soft pause is the other thing it will say no to, read fresh before every send, and a failed send is reported to the ops channel from here because this is the only place a send can fail.
 Deciding between deferring a post and dropping it belongs to the cadence leg, not here.
 
 Every send is written to the `rebe` database before it goes on the wire, so a restart cannot hand a crash loop a fresh allowance, and a transport failure cannot turn a retry into a burst.
@@ -89,6 +90,34 @@ A rejected answer moves the run on to the next candidate, up to a small bound; a
 Then the post goes out through the shared pacer, and only after that is the item written to the posted store - so a failed send costs a re-fetch rather than losing the item for good.
 `--limit N` caps how many items one run may post; the default is one, and the pacer's post-to-post gap governs the spacing regardless.
 Running the command again immediately posts nothing, because every candidate is already known.
+
+## The ops channel
+
+Everything the maintainer hears, and the one thing they can say back, goes through Telegram rather than WhatsApp.
+That is the whole point: an alert about Evolution being down cannot travel through Evolution.
+
+```sh
+docker run --rm --env-file .env rebe-agent    # boots, then the ops channel is the loop
+```
+
+**The heartbeat.** The process pushes to an Uptime Kuma push monitor about every sixty seconds, and a missed beat is what makes Kuma fire the Telegram alert.
+The beat is emitted from inside the running loop rather than by a health endpoint, so it proves the loop is turning and not merely that the process exists - a wedged loop and a crashed process look the same to Kuma, which is the point.
+It also needs no exposed port, and the agent has no public URL.
+
+**The alerts.** `rebe_agent/alerts.py` names the closed set of things worth waking somebody for: a 463 reach-out time-lock or other rate error on send, any other send Evolution would not take, an Evolution connection that has dropped, the two shapes a ban arrives in, and a DeepSeek call that came back with nothing.
+Each alert carries what happened, whether Rebe is still sending, and what to do about it - the permanent-ban one says to point `EVOLUTION_INSTANCE` at `bien-backup`, the temporary one says explicitly not to.
+Repeats of one signal are collapsed into one message per half hour and counted into the next one, because an alert storm is the same as no alerts.
+
+The two ban shapes also stop her, by flipping the same switch an operator uses, since "stop sending, do not keep hammering" needs a mechanism and that is the one there is.
+A dropped connection does not: Evolution reconnects on its own, and a pause nobody undoes is worse than a few failed sends.
+
+**The soft pause.** `/pausa [motivo]` in the ops chat and Rebe goes quiet while staying in the group; `/reanuda` and she carries on; `/estado` says where the switch stands.
+The switch is a row in the `rebe` database, so a redeploy does not silently undo it, and the pacer reads it before every send - which is what makes one switch cover posts and replies alike, `--say` and `--post-news` included.
+Nothing is queued while she is quiet, so resuming is one ordinary message rather than a backlog fired at the group.
+The heartbeat keeps flowing and the scheduler keeps ticking throughout, so a pause is visibly different from an outage.
+
+There is deliberately no in-group command - no "Rebe pausa", nothing a member could see and read as a bot - and a Telegram message from any chat other than `TELEGRAM_CHAT_ID` gets silence rather than an answer.
+The hard stop is not code at all: an admin removes her number from the group like any departing member.
 
 ## Working on it
 

@@ -78,12 +78,25 @@ jobs:
           grep -q 'evolution_instance=bien-rebe' boot.log
           grep -q 'timezone=America/Mexico_City' boot.log
       - name: Stay up, then stop cleanly on SIGTERM
+        # The wait is longer than the container needs on a healthy deployment: with
+        # no `rebe` database reachable here, boot spends a few seconds failing to
+        # read the soft-pause switch before the ops channel comes up - which it
+        # must do anyway, because an unreachable database is exactly when a
+        # maintainer needs to be told something.
         run: |
           id=$(docker run -d --env-file .env.ci rebe-agent:ci)
-          sleep 3
+          sleep 10
           test "$(docker inspect -f '{{.State.Running}}' "$id")" = "true"
           docker stop -t 15 "$id" > /dev/null
           docker logs "$id"
+          docker logs "$id" 2>&1 | grep -q 'the ops channel is up'
+          docker logs "$id" 2>&1 | grep -q 'ops control channel is listening'
+          # The Telegram bot token lives in the URL path, so any line carrying it
+          # is a leaked credential - httpx logs request URLs at INFO by default.
+          if docker logs "$id" 2>&1 | grep -q 'bot ci-placeholder\|botci-placeholder'; then
+            echo "the bot token reached the log"
+            exit 1
+          fi
           test "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = "0"
           docker rm "$id" > /dev/null
       - name: Local time follows TZ
@@ -121,6 +134,14 @@ jobs:
             -c 'from rebe_agent.feeds import FEEDS; print("feeds", len(FEEDS), sorted(f.key for f in FEEDS)[0])' \
             | grep -q 'feeds 8 deepmind'
           docker run --rm --env-file .env.ci rebe-agent:ci --help | grep -q -- '--post-news'
+      # And the ops channel: it is the only thing that tells a human anything, so
+      # an image that lost it would fail silently by definition.
+      - name: The ops channel is in the image, with its heartbeat and its commands
+        run: |
+          docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
+            -c 'from rebe_agent.heartbeat import HEARTBEAT_SECONDS; from rebe_agent.ops import PAUSE_COMMANDS, RESUME_COMMANDS; print("ops", int(HEARTBEAT_SECONDS), sorted(PAUSE_COMMANDS)[0], sorted(RESUME_COMMANDS)[0])' \
+            | grep -q 'ops 60 pausa reanuda'
+
       - name: Refuse to boot with a required variable missing
         run: |
           grep -v '^DEEPSEEK_API_KEY=' .env.ci > .env.broken

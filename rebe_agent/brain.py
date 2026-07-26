@@ -55,7 +55,7 @@ from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.usage import RunUsage
 
-from rebe_agent.alerts import Alerter, LoggingAlerter
+from rebe_agent.alerts import Alerter, BrainWatch, LoggingAlerter, Watchtower
 from rebe_agent.clock import Clock
 from rebe_agent.config import Settings
 from rebe_agent.guard import CallRateGuard, DailyCallCeilingError
@@ -189,9 +189,12 @@ def build_model(
 class Brain:
     """One typed, counted, capped call to DeepSeek."""
 
-    def __init__(self, model: OpenAIChatModel, guard: CallRateGuard) -> None:
+    def __init__(
+        self, model: OpenAIChatModel, guard: CallRateGuard, watch: BrainWatch | None = None
+    ) -> None:
         self._model = model
         self._guard = guard
+        self._watch = watch or Watchtower()
 
     async def ask(
         self,
@@ -244,7 +247,13 @@ class Brain:
             )
         except Exception as exc:
             logger.warning("DeepSeek %s call failed: %s", call_type, exc)
-            raise BrainCallError(f"{call_type} call failed: {exc}") from exc
+            # The caller's answer to this is silence - the item is dropped and the
+            # group is told nothing - so the only way anybody learns is the
+            # out-of-band channel. The ceiling above is deliberately not alerted
+            # here: the guard already says the day is spent, in its own words.
+            failure = BrainCallError(f"{call_type} call failed: {exc}")
+            await self._watch.brain_failed(failure)
+            raise failure from exc
         finally:
             if tally.requests:
                 await self._guard.record_usage(reservation, usage_from_run(tally))
@@ -260,6 +269,13 @@ def build_brain(
     *,
     http_client: httpx.AsyncClient | None = None,
 ) -> Brain:
-    """Assemble the brain both legs share."""
-    guard = CallRateGuard(store, clock, alerter or LoggingAlerter())
-    return Brain(build_model(settings, http_client=http_client), guard)
+    """Assemble the brain both legs share.
+
+    One alert channel for both things worth telling a human about here: the day's
+    call count running away, which the guard watches, and a call that came back
+    with nothing, which the brain itself sees. A ban is not among them, so no
+    pause switch is wired in: a DeepSeek outage must not silence WhatsApp.
+    """
+    channel = alerter or LoggingAlerter()
+    guard = CallRateGuard(store, clock, channel)
+    return Brain(build_model(settings, http_client=http_client), guard, Watchtower(channel))

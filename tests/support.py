@@ -59,6 +59,8 @@ class RecordingAlerter:
 
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.keys: list[str] = []
 
-    async def alert(self, message: str) -> None:
+    async def alert(self, message: str, *, key: str | None = None) -> None:
         self.messages.append(message)
+        self.keys.append(key or message)

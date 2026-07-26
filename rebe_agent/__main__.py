@@ -13,23 +13,26 @@ import asyncio
 import logging
 import os
 import signal
-import threading
 import time
-from collections.abc import Mapping, Sequence
-from types import FrameType
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 
 import httpx
+import psycopg
+from psycopg_pool import PoolTimeout
 
 from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
 from rebe_agent.curate import DEFAULT_FILTERS
-from rebe_agent.db import open_pool
+from rebe_agent.db import Pool, open_pool
 from rebe_agent.evolution import EvolutionError, build_client
 from rebe_agent.feeds import WebCandidates
 from rebe_agent.news import NewsLeg
+from rebe_agent.ops import OpsChannel, build_ops
 from rebe_agent.pacer import Pacer, SendRefusedError
+from rebe_agent.pause import PauseState, PostgresPauseSwitch
 from rebe_agent.posted import PostgresPostedStore
 from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
@@ -39,6 +42,9 @@ EXIT_BAD_CONFIG = 2
 EXIT_CALL_FAILED = 3
 EXIT_SEND_REFUSED = 4
 EXIT_SEND_FAILED = 5
+
+SWITCH_READY_SECONDS = 5.0
+"""How long boot spends reaching the soft-pause switch before carrying on without it."""
 
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
 
@@ -113,6 +119,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 def _configure_logging(level: int | str = logging.INFO) -> None:
     logging.basicConfig(format=LOG_FORMAT, level=level)
     logging.getLogger().setLevel(level)
+    # httpx logs the URL of every request it makes at INFO, and Telegram puts the
+    # bot token in the URL *path* - so an INFO-level run would write that
+    # credential to the log every time the ops channel polls. Nothing here needs
+    # that line: each call site already logs what it did and what came back.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def apply_timezone(name: str) -> None:
@@ -142,6 +153,20 @@ def log_startup(settings: Settings, clock: Clock) -> None:
         settings.timezone,
         clock.now().isoformat(timespec="seconds"),
     )
+
+
+@asynccontextmanager
+async def open_ops(settings: Settings, clock: Clock, pool: Pool) -> AsyncIterator[OpsChannel]:
+    """The ops channel, over its own HTTP client, with the switch's table ready.
+
+    Every command that can send opens this: the soft pause has to gate a `--say`
+    and a `--post-news` exactly as it gates the running loop, or "Rebe goes
+    silent" would be a promise about one code path out of three.
+    """
+    switch = PostgresPauseSwitch(pool, clock)
+    await switch.ensure_schema()
+    async with httpx.AsyncClient() as http:
+        yield build_ops(settings, clock, switch, http)
 
 
 async def ask_once(settings: Settings, clock: Clock, prompt: str) -> int:
@@ -186,10 +211,13 @@ async def say_once(settings: Settings, clock: Clock, chat: str, text: str, kind:
     in forty minutes" and "Evolution is down" are not the same news.
     """
     async with (
-        PostgresSendLog.connect(settings.rebe_database_url.get_secret_value()) as log,
+        open_pool(settings.rebe_database_url.get_secret_value()) as pool,
         build_client(settings) as client,
+        open_ops(settings, clock, pool) as ops,
     ):
-        pacer = Pacer(client, log, clock)
+        log = PostgresSendLog(pool)
+        await log.ensure_schema()
+        pacer = Pacer(client, log, clock, pause=ops.pause, watch=ops.watchtower)
         try:
             # The pacer logs the send it made; there is one event here, not two.
             await pacer.send(kind, chat, text)
@@ -217,6 +245,7 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
         open_pool(settings.rebe_database_url.get_secret_value()) as pool,
         build_client(settings) as evolution,
         httpx.AsyncClient() as web,
+        open_ops(settings, clock, pool) as ops,
     ):
         usage = PostgresUsageStore(pool)
         sends = PostgresSendLog(pool)
@@ -228,8 +257,8 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
         # One `Filters` for both halves: the fetch asks each source for exactly
         # what the curator would have kept, rather than for its own idea of it.
         leg = NewsLeg(
-            build_brain(settings, clock, usage),
-            Pacer(evolution, sends, clock),
+            build_brain(settings, clock, usage, ops.alerts),
+            Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower),
             WebCandidates(web, filters=DEFAULT_FILTERS),
             posted,
             clock,
@@ -251,25 +280,92 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
     return EXIT_OK
 
 
-def run(settings: Settings, clock: Clock) -> int:
-    """Hold the process open until the platform stops it.
+def stop_on_signals(stopping: asyncio.Event) -> None:
+    """Ask the loops to finish on SIGTERM or SIGINT.
 
-    The news leg exists, but only on demand through `--post-news`: what puts it
-    on a timer is the cadence ticket. The webhook leg lands in a later one. So
-    this skeleton still only has to boot, stay up, and shut down on SIGTERM.
+    `add_signal_handler` is the asyncio-safe way and is POSIX-only, which is where
+    the container runs. The fallback keeps a local run on Windows interruptible,
+    and hands the event back to the loop's thread rather than setting it inside
+    the handler.
     """
-    apply_timezone(settings.timezone)
-    stopping = threading.Event()
+    loop = asyncio.get_running_loop()
 
-    def _stop(signum: int, _frame: FrameType | None) -> None:
-        logger.info("received %s, shutting down", signal.Signals(signum).name)
+    def stop(name: str) -> None:
+        logger.info("received %s, shutting down", name)
         stopping.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, _stop)
+        try:
+            loop.add_signal_handler(sig, stop, sig.name)
+        except NotImplementedError:  # pragma: no cover - Windows only
+            signal.signal(
+                sig,
+                lambda number, _frame: loop.call_soon_threadsafe(stop, signal.Signals(number).name),
+            )
 
-    logger.info("no legs wired yet; idling as instance %s", settings.evolution_instance)
-    stopping.wait()
+
+async def report_the_switch(switch: PostgresPauseSwitch) -> None:
+    """Create the switch's table, and log where it stands, or say why it could not.
+
+    Bounded and forgiving on purpose. A pause survives a restart, so the one line
+    an operator needs at boot is whether this process starts out silent. But the
+    heartbeat and the control channel are exactly what a maintainer wants alive
+    when the `rebe` database is unreachable, and a boot that waited here would
+    take them down with it - and with them any chance of hearing about it.
+    """
+
+    async def read() -> PauseState:
+        await switch.ensure_schema()
+        return await switch.state()
+
+    try:
+        state = await asyncio.wait_for(read(), SWITCH_READY_SECONDS)
+    except (TimeoutError, psycopg.Error, PoolTimeout) as exc:
+        logger.error(
+            "could not read the soft pause switch (%s): %s. The ops channel is "
+            "coming up anyway, so somebody can hear about it.",
+            type(exc).__name__,
+            str(exc) or "no detail",
+        )
+        return
+    if state.paused:
+        logger.warning(
+            "starting PAUSED since %s (%s): nothing will be sent until /reanuda",
+            state.since.isoformat(timespec="seconds") if state.since else "unknown",
+            state.reason or "no reason recorded",
+        )
+    else:
+        logger.info("the soft pause is off; sending is normal")
+
+
+async def serve(settings: Settings, clock: Clock) -> int:
+    """Hold the process open, with the ops channel running, until it is stopped.
+
+    The two legs are still on demand - `--post-news` now, the cadence and webhook
+    tickets later - so what this loop carries today is the out-of-band channel:
+    the Kuma heartbeat, and the Telegram listener that carries the soft pause.
+    Both are the same shape as the legs will be, and the heartbeat proves this
+    loop is turning, which is the whole reason it is emitted from in here.
+    """
+    apply_timezone(settings.timezone)
+    stopping = asyncio.Event()
+    # Before anything that can wait on the network: a SIGTERM in the first few
+    # seconds must stop the process rather than kill it, and until this runs the
+    # default action for SIGTERM is to die on the spot.
+    stop_on_signals(stopping)
+
+    async with (
+        open_pool(settings.rebe_database_url.get_secret_value()) as pool,
+        httpx.AsyncClient() as http,
+    ):
+        switch = PostgresPauseSwitch(pool, clock)
+        await report_the_switch(switch)
+        ops = build_ops(settings, clock, switch, http)
+        logger.info(
+            "no legs wired yet; the ops channel is up for instance %s",
+            settings.evolution_instance,
+        )
+        await ops.serve(stopping)
     logger.info("rebe-agent stopped")
     return EXIT_OK
 
@@ -302,7 +398,7 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
     if args.post_news:
         return asyncio.run(post_news_once(settings, clock, args.to, args.limit))
 
-    return run(settings, clock)
+    return asyncio.run(serve(settings, clock))
 
 
 if __name__ == "__main__":  # pragma: no cover
