@@ -26,6 +26,7 @@ from psycopg_pool import PoolTimeout
 from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.breaking import Breaking
+from rebe_agent.chimeins import ChimeInBudget, PostgresChimeInLog
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
 from rebe_agent.curate import DEFAULT_FILTERS
@@ -449,19 +450,24 @@ async def serve(settings: Settings, clock: Clock) -> int:
         open_ops(settings, clock, pool) as ops,
     ):
         memory = PostgresGroupMemory(pool)
+        chime_ins = PostgresChimeInLog(pool)
         stack = build_news_stack(settings, clock, pool, evolution, web, ops)
-        preparing = asyncio.create_task(_prepare(stack, memory))
+        preparing = asyncio.create_task(_prepare(stack, memory, chime_ins))
 
         await log_the_soft_pause(ops.pause)
 
         # `stack.pacer`, not a second one. Both legs send through the object that
         # holds the day's count, the turnstile and the soft pause, which is what
         # makes the ceilings span news posts and replies rather than double.
+        # The chime-in budget is per local day and lives in the same database as
+        # everything else, so a restart does not hand her a fresh allowance to
+        # speak up uninvited.
         reply = ReplyLeg(
             build_brain(settings, clock, stack.usage, ops.alerts),
             stack.pacer,
             evolution,
             memory,
+            ChimeInBudget(chime_ins, clock),
         )
         # The override leg posts through the same news leg and the same pacer the
         # drawn slots do, so "important news is never held back by the quota"
@@ -554,11 +560,14 @@ async def _serve_webhook(server: EmbeddedServer, stopping: asyncio.Event) -> Non
         halt.cancel()
 
 
-async def _prepare(stack: NewsStack, memory: PostgresGroupMemory) -> None:
+async def _prepare(
+    stack: NewsStack, memory: PostgresGroupMemory, chime_ins: PostgresChimeInLog
+) -> None:
     """Make sure the `rebe` tables exist, without being able to stop the boot."""
     try:
         await stack.ensure_schema()
         await memory.ensure_schema()
+        await chime_ins.ensure_schema()
     except psycopg.Error as exc:
         logger.error("the rebe database is not ready; Rebe will stay silent until it is. %s", exc)
     else:
