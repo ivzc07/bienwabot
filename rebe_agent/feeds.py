@@ -33,9 +33,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Coroutine, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from html import unescape
 from typing import Any, Protocol
@@ -43,6 +43,7 @@ from xml.etree import ElementTree
 
 import httpx
 
+from rebe_agent.curate import DEFAULT_FILTERS, Filters
 from rebe_agent.items import NewsItem
 
 logger = logging.getLogger("rebe_agent.feeds")
@@ -128,39 +129,44 @@ class WebCandidates:
         http: httpx.AsyncClient,
         *,
         feeds: Iterable[Feed] = FEEDS,
-        points_floor: int = 100,
-        freshness: timedelta = timedelta(hours=36),
+        filters: Filters = DEFAULT_FILTERS,
         query: str = HN_QUERY,
     ) -> None:
         self._http = http
         self._feeds = tuple(feeds)
-        self._points_floor = points_floor
-        self._freshness = freshness
+        # The same object the curator will judge the answers by. Two copies of
+        # the points floor - one asked for, one enforced - is a config change
+        # that silently narrows the fetch below what the filter would have kept.
+        self._filters = filters
         self._query = query
 
     async def fetch(self, now: datetime) -> Sequence[NewsItem]:
-        sources = [self._hacker_news(now), *(self._feed(feed) for feed in self._feeds)]
-        gathered = await asyncio.gather(*sources, return_exceptions=True)
+        # Name and request together, so adding a source cannot leave the two
+        # lists one apart and mislabel every failure after it.
+        jobs: list[tuple[str, Coroutine[Any, Any, list[NewsItem]]]] = [
+            (HN_SOURCE, self._hacker_news(now)),
+            *((feed.key, self._feed(feed)) for feed in self._feeds),
+        ]
+        gathered = await asyncio.gather(*(request for _, request in jobs), return_exceptions=True)
 
         items: list[NewsItem] = []
-        named = zip((HN_SOURCE, *(feed.key for feed in self._feeds)), gathered, strict=True)
-        for source, result in named:
+        for (source, _), result in zip(jobs, gathered, strict=True):
             if isinstance(result, BaseException):
                 logger.warning("%s did not answer, skipping it this run: %s", source, result)
                 continue
             items.extend(result)
-        logger.info("%d candidates from %d sources", len(items), len(sources))
+        logger.info("%d candidates from %d sources", len(items), len(jobs))
         return items
 
     async def _hacker_news(self, now: datetime) -> list[NewsItem]:
         """One request: recent stories, above the points floor, already hydrated."""
-        since = int((now - self._freshness).timestamp())
+        since = int((now - self._filters.freshness).timestamp())
         response = await self._http.get(
             HN_ENDPOINT,
             params={
                 "query": self._query,
                 "tags": "story",
-                "numericFilters": f"points>={self._points_floor},created_at_i>={since}",
+                "numericFilters": (f"points>={self._filters.points_floor},created_at_i>={since}"),
                 "hitsPerPage": HN_HITS,
             },
             headers={"User-Agent": USER_AGENT},

@@ -25,7 +25,7 @@ from datetime import datetime
 from typing import Protocol
 
 from rebe_agent.db import Pool, open_pool
-from rebe_agent.items import NewsItem
+from rebe_agent.items import NewsItem, SeenItems
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,17 +72,14 @@ class InMemoryPostedStore:
 
     def __init__(self) -> None:
         self.items: list[PostedItem] = []
+        self._seen = SeenItems()
 
     async def knows(self, item: NewsItem) -> bool:
-        return any(
-            (posted.source, posted.source_id) == item.source_key
-            or posted.canonical_url == item.canonical_url
-            or posted.title_hash == item.title_hash
-            for posted in self.items
-        )
+        return self._seen.knows(item)
 
     async def remember(self, item: NewsItem, at: datetime) -> None:
         self.items.append(PostedItem.of(item, at))
+        self._seen.remember(item)
 
 
 SCHEMA = """
@@ -98,7 +95,9 @@ CREATE TABLE IF NOT EXISTS posted_items (
 """
 
 INDEXES = (
-    # Unique, so even a second process could not write the same source item twice.
+    # Unique, so the same source item cannot end up as two rows. It is not what
+    # stops a double post - a single replica sending through one pacer is - but
+    # it keeps this table honest if a run is ever started twice by hand.
     "CREATE UNIQUE INDEX IF NOT EXISTS posted_items_source_idx ON posted_items (source, source_id)",
     # Not unique: two sources legitimately produce one row each here before the
     # first of them is ever posted, and the read below is what does the dropping.

@@ -32,7 +32,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from rebe_agent.items import NewsItem
+from rebe_agent.items import NewsItem, SeenItems
 
 logger = logging.getLogger("rebe_agent.curate")
 
@@ -168,18 +168,12 @@ def collapse(items: Iterable[NewsItem]) -> list[NewsItem]:
     score rather than by fetch order.
     """
     kept: list[NewsItem] = []
-    seen_sources: set[tuple[str, str]] = set()
-    seen_urls: set[str] = set()
-    seen_titles: set[str] = set()
-
+    seen = SeenItems()
     for item in items:
-        keys = (item.source_key, item.canonical_url, item.title_hash)
-        if keys[0] in seen_sources or keys[1] in seen_urls or keys[2] in seen_titles:
+        if seen.knows(item):
             logger.debug("collapsing a duplicate of %s from %s", item.canonical_url, item.source)
             continue
-        seen_sources.add(keys[0])
-        seen_urls.add(keys[1])
-        seen_titles.add(keys[2])
+        seen.remember(item)
         kept.append(item)
     return kept
 

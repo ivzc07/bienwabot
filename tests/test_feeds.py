@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from rebe_agent.curate import usable
+from rebe_agent.curate import Filters, usable
 from rebe_agent.feeds import (
     FEEDS,
     HN_ENDPOINT,
@@ -172,7 +172,9 @@ async def test_the_floor_and_the_window_are_pushed_into_the_hn_query() -> None:
     web = Web()
 
     await WebCandidates(
-        web.client(), feeds=[], points_floor=150, freshness=timedelta(hours=24)
+        web.client(),
+        feeds=[],
+        filters=Filters(points_floor=150, freshness=timedelta(hours=24)),
     ).fetch(NOON)
 
     params = web.hn_query

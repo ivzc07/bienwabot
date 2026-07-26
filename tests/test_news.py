@@ -23,6 +23,7 @@ from rebe_agent.evolution import EvolutionClient, EvolutionError
 from rebe_agent.items import NewsItem
 from rebe_agent.news import (
     MAX_FRAMING_CHARS,
+    REJECTIONS_PER_RUN,
     NewsLeg,
     NewsPost,
     PostRejectedError,
@@ -36,6 +37,7 @@ from rebe_agent.usage import CallType, InMemoryUsageStore
 from tests.deepseek_stub import FakeDeepSeek, tool_call_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, NOON, RecordingAlerter, item
+from tests.test_config import COMPLETE_ENV
 
 SEED = 20260725
 
@@ -75,8 +77,6 @@ class StubCandidates:
 
 @pytest.fixture
 def settings() -> Settings:
-    from tests.test_config import COMPLETE_ENV
-
     return load_settings(dict(COMPLETE_ENV))
 
 
@@ -105,6 +105,24 @@ def make_brain(settings: Settings, fake: FakeDeepSeek) -> Brain:
     )
 
 
+def make_pacer(
+    evolution: FakeEvolution,
+    clock: ManualClock,
+    log: InMemorySendLog | None = None,
+    *,
+    envelope: Envelope | None = None,
+) -> Pacer:
+    """The real pacer, against a fake Evolution and a clock a test can move."""
+    return Pacer(
+        EvolutionClient(BASE_URL, API_KEY, INSTANCE, http_client=evolution.client()),
+        log or InMemorySendLog(),
+        clock,
+        envelope=envelope or ROOMY,
+        sleeper=ManualSleeper(clock),
+        rng=random.Random(SEED),
+    )
+
+
 def make_leg(
     settings: Settings,
     fake: FakeDeepSeek,
@@ -115,14 +133,7 @@ def make_leg(
     *,
     envelope: Envelope | None = None,
 ) -> NewsLeg:
-    pacer = Pacer(
-        EvolutionClient(BASE_URL, API_KEY, INSTANCE, http_client=evolution.client()),
-        InMemorySendLog(),
-        clock,
-        envelope=envelope or ROOMY,
-        sleeper=ManualSleeper(clock),
-        rng=random.Random(SEED),
-    )
+    pacer = make_pacer(evolution, clock, envelope=envelope)
     return NewsLeg(make_brain(settings, fake), pacer, candidates, posted, clock)
 
 
@@ -137,12 +148,17 @@ def test_the_post_is_one_framing_line_and_the_canonical_link() -> None:
     )
 
 
-def test_the_link_is_the_canonical_one_not_whatever_the_feed_carried() -> None:
+def test_the_posted_link_is_the_publishers_own_minus_the_tracking() -> None:
+    """The dedup key is canonicalised - https forced, `www.` dropped, query
+    reordered - and the posted link deliberately is not. A host that serves only
+    `www.`, or only http, would be handed a dead link, and "never shortens a
+    link" cuts both ways."""
     tracked = item(url="https://www.openai.com/index/local-model/?utm_source=rss")
 
     rendered = render(NewsPost(opener="", line="ya salio"), tracked)
 
-    assert rendered.endswith("\nhttps://openai.com/index/local-model")
+    assert rendered.endswith("\nhttps://www.openai.com/index/local-model/")
+    assert tracked.canonical_url == "https://openai.com/index/local-model"
 
 
 def test_a_post_with_no_framing_word_is_still_a_post() -> None:
@@ -194,10 +210,29 @@ def test_an_essay_is_not_a_whatsapp_message() -> None:
         render(NewsPost(opener="", line="a" * (MAX_FRAMING_CHARS + 1)), LAUNCH)
 
 
-def test_a_joined_emoji_sequence_counts_as_the_one_emoji_it_looks_like() -> None:
-    assert emoji_count("hola 👩‍💻 que tal") == 1
-    assert emoji_count("hola 👀 que 🔥 tal") == 2
-    assert emoji_count("sin nada") == 0
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("sin nada", 0),
+        ("hola 👀 que tal", 1),
+        ("hola 👀 que 🔥 tal", 2),
+        ("una familia 👩‍💻 programando", 1),
+        ("saludos 👋🏽 desde aca", 1),
+        ("viva mexico 🇲🇽", 1),
+        ("mexico 🇲🇽 y espana 🇪🇸", 2),
+        ("ojo ‼️ con esto", 1),
+        ("el 50% de la gente, -no todos-", 0),
+    ],
+)
+def test_emoji_are_counted_the_way_a_reader_counts_them(text: str, expected: int) -> None:
+    """A flag is two code points and one picture; `‼️` is punctuation plus a
+    variation selector and one picture. Counting code points would refuse
+    "viva mexico 🇲🇽" for using two emoji, which is not what a reader sees."""
+    assert emoji_count(text) == expected
+
+
+def test_a_single_flag_is_not_two_emoji() -> None:
+    assert "🇲🇽" in render(NewsPost(opener="", line="salio algo en mexico 🇲🇽"), LAUNCH)
 
 
 # --- one run -----------------------------------------------------------------
@@ -348,16 +383,21 @@ async def test_a_deepseek_failure_posts_nothing_and_keeps_the_item(
     posted: InMemoryPostedStore,
     clock: ManualClock,
 ) -> None:
-    """Silently: a bad call is not an outage, and the item comes back next run."""
-    fake = FakeDeepSeek(500)
+    """Silently: a bad call is not an outage, and the item comes back next run.
 
-    sent = await make_leg(settings, fake, evolution, posted, clock, StubCandidates(LAUNCH)).run(
-        GROUP
-    )
+    The run ends there rather than trying the next candidate, because what failed
+    is the brain - the endpoint, or the day's call ceiling - and the next
+    candidate would fail in exactly the same way.
+    """
+    fake = FakeDeepSeek(500)
+    pool = StubCandidates(LAUNCH, item(source_id="b", url="https://a.mx/2"))
+
+    sent = await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP)
 
     assert sent == []
     assert evolution.calls == []
     assert posted.items == []
+    assert len(fake.requests) == 1, "a broken brain is not asked again this run"
 
 
 async def test_a_post_that_fails_validation_never_reaches_the_group(
@@ -375,6 +415,57 @@ async def test_a_post_that_fails_validation_never_reaches_the_group(
     assert sent == []
     assert evolution.calls == []
     assert posted.items == []
+
+
+async def test_an_unusable_answer_drops_that_item_and_the_run_tries_the_next(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """Unlike a brain failure, a rejected post is about *this* item: the model
+    could only describe this headline by inventing a number. The next candidate
+    is a different headline, so the run moves on rather than giving up."""
+    best = item(source_id="a", title="Primera nota sobre un modelo", url="https://a.mx/1")
+    next_best = item(
+        source_id="b",
+        title="Segunda nota sobre un modelo",
+        url="https://a.mx/2",
+        published_at=NOON - timedelta(hours=5),
+    )
+    fake = FakeDeepSeek(answer(line="son 900 mil millones de parametros"), answer(line="ya salio"))
+
+    sent = await make_leg(
+        settings, fake, evolution, posted, clock, StubCandidates(best, next_best)
+    ).run(GROUP)
+
+    assert [post.item for post in sent] == [next_best]
+    assert [row.source_id for row in posted.items] == ["b"]
+
+
+async def test_a_run_stops_paying_for_answers_it_keeps_rejecting(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """Moving on has to be bounded, or a bad day spends the whole shortlist."""
+    pool = StubCandidates(
+        *(
+            item(
+                source_id=str(number),
+                title=f"Nota numero {number} de hoy",
+                url=f"https://a.mx/{number}",
+            )
+            for number in range(REJECTIONS_PER_RUN + 3)
+        )
+    )
+    fake = FakeDeepSeek(answer(line="son 900 mil millones de parametros"))
+
+    sent = await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP)
+
+    assert sent == []
+    assert len(fake.requests) == REJECTIONS_PER_RUN
 
 
 async def test_a_failed_send_does_not_permanently_burn_the_item(
@@ -434,16 +525,10 @@ async def test_every_send_is_counted_against_the_usage_the_budget_watches(
         RecordingAlerter(),
         http_client=FakeDeepSeek(answer()).client(),
     )
-    pacer = Pacer(
-        EvolutionClient(BASE_URL, API_KEY, INSTANCE, http_client=evolution.client()),
-        InMemorySendLog(),
-        clock,
-        envelope=ROOMY,
-        sleeper=ManualSleeper(clock),
-        rng=random.Random(SEED),
-    )
 
-    await NewsLeg(brain, pacer, StubCandidates(LAUNCH), posted, clock).run(GROUP)
+    await NewsLeg(brain, make_pacer(evolution, clock), StubCandidates(LAUNCH), posted, clock).run(
+        GROUP
+    )
 
     totals = await store.totals_on(clock.now().date())
     assert totals[CallType.NEWS_SUMMARY].calls == 1
@@ -456,17 +541,11 @@ async def test_the_send_is_recorded_as_a_post(
     clock: ManualClock,
 ) -> None:
     log = InMemorySendLog()
-    pacer = Pacer(
-        EvolutionClient(BASE_URL, API_KEY, INSTANCE, http_client=evolution.client()),
-        log,
-        clock,
-        envelope=ROOMY,
-        sleeper=ManualSleeper(clock),
-        rng=random.Random(SEED),
-    )
     brain = make_brain(settings, FakeDeepSeek(answer()))
 
-    await NewsLeg(brain, pacer, StubCandidates(LAUNCH), posted, clock).run(GROUP)
+    await NewsLeg(
+        brain, make_pacer(evolution, clock, log), StubCandidates(LAUNCH), posted, clock
+    ).run(GROUP)
 
     latest = await log.latest()
     assert latest is not None
