@@ -89,7 +89,11 @@ jobs:
           test "$(docker inspect -f '{{.State.Running}}' "$id")" = "true"
           docker stop -t 15 "$id" > /dev/null
           docker logs "$id"
-          docker logs "$id" 2>&1 | grep -q 'the ops channel is up'
+          # All three of them, in one process: the webhook leg serving, the
+          # scheduler turning, and the ops channel listening. One image that
+          # boots two of the three is the failure this step exists to catch.
+          docker logs "$id" 2>&1 | grep -q 'serving the webhook leg on port 8000'
+          docker logs "$id" 2>&1 | grep -q 'scheduler leg up'
           docker logs "$id" 2>&1 | grep -q 'ops control channel is listening'
           # Both the Telegram bot token and the Kuma push token live in a URL
           # *path*, so any logged line carrying one is a leaked credential - and
