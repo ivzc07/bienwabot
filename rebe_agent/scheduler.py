@@ -22,12 +22,20 @@ sake, and this leg inherits that. The plan table would survive a second replica 
 its unique `(day, window)` is what stops two rolls becoming eight slots - but two
 processes firing the same slot would still send twice, so the invariant stands.
 
-**Three ways a slot can end.** It posts; it is *skipped* because nothing in the
+**Four ways a slot can end.** It posts; it is *skipped* because nothing in the
 curated pool cleared the quality bar, which is the news leg's judgement and not
-this module's; or it is *dropped*, because it came due too far past its window,
+this module's; it is *dropped*, because it came due too far past its window,
 because a conversation deferred it past that edge, or because the envelope refused
-it. A dropped slot is never retried into the next window: the day's shape is the
-point, and a post that arrives two hours late is a machine catching up.
+it; or it is *pruned* by `rebe_agent.breaking` after big news went out on top of
+the day. A dropped slot is never retried into the next window: the day's shape is
+the point, and a post that arrives two hours late is a machine catching up.
+
+**The waits are interruptible when an override is wired.** A loop that only ever
+woke at its own drawn times could not notice a launch at 16:30, and section 4 of
+the cadence spec exists to stop real news waiting for the next window. So a wait
+is cut short every twenty to forty jittered minutes for a free look at the pool,
+and a slot coming due asks the overnight queue first. Both are `Breaking`'s
+judgement; what is here is when it gets asked.
 """
 
 from __future__ import annotations
@@ -49,12 +57,12 @@ from rebe_agent.cadence import (
     moment_on,
     spread,
 )
-from rebe_agent.clock import Clock, RealSleeper, Sleeper
+from rebe_agent.clock import Clock, RealSleeper, Sleeper, local_day
 from rebe_agent.evolution import EvolutionError
 from rebe_agent.news import Posted
 from rebe_agent.pacer import SendRefusedError
 from rebe_agent.plans import PlanStore
-from rebe_agent.sends import SendLog
+from rebe_agent.sends import SendKind, SendLog
 
 logger = logging.getLogger("rebe_agent.scheduler")
 
@@ -73,6 +81,20 @@ class Poster(Protocol):
         """Post up to `limit` fresh items, best first. An empty answer is a skip."""
 
 
+class Watch(Protocol):
+    """What the loop asks about big news: the override leg from #22, or a stub.
+
+    Structural for the same reason `Poster` is. Both answers are the override's
+    judgement; all this module decides is when it gets asked.
+    """
+
+    async def check(self) -> Posted | None:
+        """Is anything big enough to jump the plan? Post it if so, or hold it."""
+
+    async def claim_slot(self) -> Posted | None:
+        """Is anything waiting from overnight? A slot asks before its own pool."""
+
+
 class Scheduler:
     """The bot that runs itself: draw the day at dawn, then keep the appointments."""
 
@@ -87,6 +109,7 @@ class Scheduler:
         cadence: Cadence | None = None,
         sleeper: Sleeper | None = None,
         rng: random.Random | None = None,
+        breaking: Watch | None = None,
     ) -> None:
         self._poster = poster
         self._chat = chat
@@ -96,6 +119,7 @@ class Scheduler:
         self._cadence = cadence or Cadence()
         self._sleeper = sleeper or RealSleeper()
         self._rng = rng or random.Random()
+        self._breaking = breaking
 
     async def serve(self) -> None:
         """Sleep, wake, do the one thing that is due, repeat, until cancelled.
@@ -111,30 +135,31 @@ class Scheduler:
     async def step(self) -> None:
         """Wait for the next due thing, then do it. Exactly one turn of the loop.
 
-        One turn is one of four things: wait for dawn, roll the day, wait for a
-        slot, or fire one. Keeping them one to a turn is what lets a test drive a
-        whole day and read what happened at each step.
+        One turn is one of five things: wait for dawn, roll the day, wait for a
+        slot, look at the news on the way to either wait, or fire a slot. Keeping
+        them one to a turn is what lets a test drive a whole day and read what
+        happened at each step.
         """
         now = self._clock.now()
-        today = self._local_day(now)
+        today = local_day(now, self._clock.zone)
         plan = await self._plans.plan_on(today)
 
         if plan is None:
             dawn = self._dawn_on(today)
             if now < dawn:
-                await self._sleep_until(dawn, "the day's roll")
+                await self._wait_until(dawn, "the day's roll")
                 return
             await self._roll(today, now)
             return
 
         due = plan.pending
         if not due:
-            await self._sleep_until(self._dawn_on(today + DAY), "tomorrow's roll")
+            await self._wait_until(self._dawn_on(today + DAY), "tomorrow's roll")
             return
 
         slot = due[0]
         if slot.at > now:
-            await self._sleep_until(slot.at, f"the {slot.window} slot")
+            await self._wait_until(slot.at, f"the {slot.window} slot")
             return
         await self._fire(plan.day, slot)
 
@@ -171,9 +196,17 @@ class Scheduler:
 
     async def _fire(self, day: date, slot: Slot) -> None:
         """One slot, from due to settled: defer, drop, or post exactly once."""
+        posts = await self._sends.count_on(day, kind=SendKind.POST)
+        if posts >= self._cadence.daily_stop:
+            # Section 1's practical stop, which bounds the *day* rather than any
+            # one path into it. Only a day the overrides ran long can get here at
+            # all - four drawn slots cannot - and it is the one that most needs
+            # somebody to stop, since the alternative is drifting up towards the
+            # anti-ban ceiling on the day the news was busiest.
+            await self._drop(day, slot, f"{posts} posts today is where a normal day stops")
+            return
+
         deadline = self._cadence.deadline_for(slot, self._clock.zone)
-        # One deferral per message she sent, remembered across the waits below.
-        drawn: dict[datetime, timedelta] = {}
         while True:
             now = self._clock.now()
             if now >= deadline:
@@ -184,7 +217,7 @@ class Scheduler:
                 )
                 return
 
-            resume = await self._deferred_until(now, drawn)
+            resume = await self._deferred_until(now)
             if resume is None:
                 break
             if resume >= deadline:
@@ -203,7 +236,10 @@ class Scheduler:
             await self._sleep_until(resume, f"the {slot.window} slot")
 
         try:
-            sent = await self._poster.run(self._chat, limit=1)
+            # The overnight queue first, and only then the day's own pool: what
+            # broke while she slept goes out ahead of everything else in it.
+            claimed = await self._breaking.claim_slot() if self._breaking is not None else None
+            sent = [claimed] if claimed is not None else await self._poster.run(self._chat, limit=1)
         except SendRefusedError as exc:
             # The envelope, not the transport: nothing was sent and nothing is
             # broken. Retrying inside the window would be hammering a door the
@@ -231,34 +267,43 @@ class Scheduler:
         )
         await self._plans.settle(day, slot.window, SlotState.POSTED)
 
-    async def _deferred_until(
-        self, now: datetime, drawn: dict[datetime, timedelta]
-    ) -> datetime | None:
+    async def _deferred_until(self, now: datetime) -> datetime | None:
         """When a post may follow her last message, or `None` if it may go now.
 
-        Her last message of *any* kind, post or reply, per section 5: what looks
-        like two programs is a link landing on top of a conversation, and the
-        conversation is whichever leg was talking.
-
-        One draw per message, remembered in `drawn`, and a fresh one only when she
-        has said something new - which is the same discipline the pacer keeps for
-        the opposite reason. Redrawing on every pass would hand the wait the
-        *maximum* of its draws, since a longer draw always pushes the answer out
-        again, and "ten to twenty minutes" would settle near twenty.
+        Section 5's rule lives on the `Cadence`, because the override watch obeys
+        it too and two implementations of one rule would give the same message two
+        different answers.
         """
         last = await self._sends.latest()
         if last is None:
             return None
-        delay = drawn.get(last.sent_at)
-        if delay is None:
-            delay = spread(*self._cadence.defer, self._rng.random())
-            drawn[last.sent_at] = delay
-        resume = last.sent_at + delay
+        resume = self._cadence.resume_after(last)
         return resume if resume > now else None
 
     async def _drop(self, day: date, slot: Slot, why: str) -> None:
         logger.info("dropping the %s slot: %s", slot.window, why)
         await self._plans.settle(day, slot.window, SlotState.DROPPED)
+
+    async def _wait_until(self, target: datetime, what: str) -> None:
+        """Wait for the next planned thing, looking up for breaking news on the way.
+
+        A day that only ever woke at its drawn times could not notice a launch at
+        16:30, and section 4 is exactly about not making real news wait for the
+        next window. So a wait longer than one jittered look is cut short, the
+        pool is checked, and the loop comes straight back to the same wait.
+
+        With no override wired the wait is the wait, which is what keeps the
+        scheduler's own behaviour a property of the plan alone.
+        """
+        if self._breaking is None:
+            await self._sleep_until(target, what)
+            return
+        look = self._clock.now() + spread(*self._cadence.watch, self._rng.random())
+        if look >= target:
+            await self._sleep_until(target, what)
+            return
+        await self._sleep_until(look, "a look at the news")
+        await self._breaking.check()
 
     async def _sleep_until(self, target: datetime, what: str) -> None:
         seconds = (target - self._clock.now()).total_seconds()
@@ -269,7 +314,3 @@ class Scheduler:
 
     def _dawn_on(self, day: date) -> datetime:
         return moment_on(day, DAWN, self._clock.zone)
-
-    def _local_day(self, moment: datetime) -> date:
-        """The day in the agent's zone. A plan is about the group's day."""
-        return moment.astimezone(self._clock.zone).date()

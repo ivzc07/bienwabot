@@ -1,0 +1,28 @@
+{
+  "hits": [
+    {
+      "objectID": "42000001",
+      "title": "Anthropic releases Claude 5, its first model that runs offline",
+      "url": "https://www.anthropic.com/news/claude-5",
+      "author": "sama",
+      "points": 1420,
+      "num_comments": 620,
+      "created_at": "2026-07-25T15:00:00.000Z",
+      "created_at_i": 1784991600,
+      "story_text": null,
+      "_tags": ["story", "story_42000001"]
+    },
+    {
+      "objectID": "42000002",
+      "title": "A tiny CLI for keeping model prompts in version control",
+      "url": "https://ejemplo.dev/prompt-cli",
+      "author": "lupita",
+      "points": 150,
+      "num_comments": 40,
+      "created_at": "2026-07-25T14:00:00.000Z",
+      "created_at_i": 1784988000,
+      "story_text": null,
+      "_tags": ["story", "story_42000002"]
+    }
+  ]
+}

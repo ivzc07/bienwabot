@@ -79,6 +79,29 @@ class StubLeg:
         return answer
 
 
+class StubWatch:
+    """An override leg that answers whatever it was told to, and counts the asking.
+
+    The real one is driven end to end in `tests/test_breaking.py`; what these
+    tests are about is *when* the loop asks it, which is this module's half.
+    """
+
+    def __init__(self, clock: ManualClock, *, claims: Posted | None = None) -> None:
+        self._clock = clock
+        self.checks: list[datetime] = []
+        self.claims = 0
+        self._claimed = claims
+
+    async def check(self) -> Posted | None:
+        self.checks.append(self._clock.now())
+        return None
+
+    async def claim_slot(self) -> Posted | None:
+        self.claims += 1
+        claimed, self._claimed = self._claimed, None
+        return claimed
+
+
 @pytest.fixture
 def plans() -> InMemoryPlanStore:
     return InMemoryPlanStore()
@@ -97,6 +120,7 @@ def make_scheduler(
     *,
     cadence: Cadence | None = None,
     seed: int = SEED,
+    breaking: StubWatch | None = None,
 ) -> tuple[Scheduler, ManualSleeper]:
     sleeper = ManualSleeper(clock)
     scheduler = Scheduler(
@@ -108,17 +132,24 @@ def make_scheduler(
         cadence=cadence,
         sleeper=sleeper,
         rng=random.Random(seed),
+        breaking=breaking,
     )
     return scheduler, sleeper
 
 
-async def seed_send(sends: InMemorySendLog, when: datetime, *, text: str = "ahi va") -> None:
+async def seed_send(
+    sends: InMemorySendLog,
+    when: datetime,
+    *,
+    text: str = "ahi va",
+    kind: SendKind = SendKind.REPLY,
+) -> None:
     """One message Rebe already sent, as a restart would find it in the log."""
     await sends.record(
         SendRecord(
             sent_at=when,
             day=when.astimezone(MEXICO_CITY).date(),
-            kind=SendKind.REPLY,
+            kind=kind,
             chat=GROUP,
             fingerprint=fingerprint(text),
         )
@@ -601,6 +632,170 @@ async def test_a_cadence_of_one_window_is_still_a_day(
     assert plan is not None
     assert [s.window for s in plan.slots] == ["solo"]
     assert len(leg.calls) == 1
+
+
+# --- looking up from the plan for breaking news ------------------------------
+
+
+async def test_a_long_wait_is_cut_short_for_a_look_at_the_news(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """A day that only ever woke at its own drawn times could not notice a launch
+    at 16:30, which is the restriction section 4 exists to remove."""
+    await plans.register(
+        DayPlan(day=WEDNESDAY, slots=(slot(time(19, 2), window="evening", closes=time(20, 0)),))
+    )
+    clock = ManualClock(at(time(14, 0)))
+    watch = StubWatch(clock)
+    scheduler, _ = make_scheduler(StubLeg(), clock, plans, sends, breaking=watch)
+
+    await scheduler.step()
+
+    assert len(watch.checks) == 1
+    assert at(time(14, 20)) <= watch.checks[0] <= at(time(14, 40))
+    assert clock.now() < at(time(19, 2)), "the slot is still ahead; only the wait was cut"
+
+
+async def test_the_loop_comes_straight_back_to_the_same_wait(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """The look is a turn of the loop, not a detour: the slot it was waiting for
+    is still the next thing to happen."""
+    await plans.register(
+        DayPlan(day=WEDNESDAY, slots=(slot(time(19, 2), window="evening", closes=time(20, 0)),))
+    )
+    clock = ManualClock(at(time(18, 0)))
+    watch = StubWatch(clock)
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends, breaking=watch)
+
+    for _ in range(6):
+        await scheduler.step()
+
+    assert clock.now() >= at(time(19, 2))
+    assert leg.calls == [(GROUP, 1)]
+    assert watch.checks, "and it looked at the news on the way"
+
+
+async def test_a_wait_shorter_than_a_look_is_simply_waited(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """Nothing is gained by waking ten minutes before a slot to check the news."""
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    clock = ManualClock(at(time(9, 10)))
+    watch = StubWatch(clock)
+    scheduler, _ = make_scheduler(StubLeg(), clock, plans, sends, breaking=watch)
+
+    await scheduler.step()
+
+    assert watch.checks == []
+    assert clock.now() == at(time(9, 14))
+
+
+async def test_the_night_is_watched_too(plans: InMemoryPlanStore, sends: InMemorySendLog) -> None:
+    """Section 6 only works if something is looking: the overnight queue can only
+    hold what the process noticed before dawn."""
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    await plans.settle(WEDNESDAY, "morning", SlotState.POSTED)
+    clock = ManualClock(at(time(23, 30)))
+    watch = StubWatch(clock)
+    scheduler, _ = make_scheduler(StubLeg(), clock, plans, sends, breaking=watch)
+
+    await scheduler.step()
+
+    assert len(watch.checks) == 1
+    assert clock.now() < at(DAWN, THURSDAY)
+
+
+async def test_a_loop_with_no_override_wired_waits_exactly_as_long_as_it_planned(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """Which is what keeps the scheduler's own behaviour a property of the plan."""
+    await plans.register(
+        DayPlan(day=WEDNESDAY, slots=(slot(time(19, 2), window="evening", closes=time(20, 0)),))
+    )
+    clock = ManualClock(at(time(14, 0)))
+    scheduler, _ = make_scheduler(StubLeg(), clock, plans, sends)
+
+    await scheduler.step()
+
+    assert clock.now() == at(time(19, 2))
+
+
+async def test_a_drawn_slot_stops_at_eight_posts_like_everything_else(
+    plans: InMemoryPlanStore, sends: InMemorySendLog, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The practical stop bounds the day, not one path into it. Only a day the
+    overrides ran long can reach it - four drawn slots cannot - and that is the
+    day that most needs somebody to stop rather than drift at the ceiling."""
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    for hour in range(8):
+        await seed_send(sends, at(time(hour, 0)), text=f"la numero {hour}", kind=SendKind.POST)
+    clock = ManualClock(at(time(9, 14)))
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends)
+
+    with caplog.at_level(logging.INFO):
+        await scheduler.step()
+
+    plan = await plans.plan_on(WEDNESDAY)
+    assert plan is not None
+    assert plan.slots[0].state is SlotState.DROPPED
+    assert leg.calls == []
+    assert "where a normal day stops" in caplog.text
+
+
+async def test_seven_posts_still_leaves_room_for_the_eighth(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    for hour in range(7):
+        await seed_send(sends, at(time(hour, 0)), text=f"la numero {hour}", kind=SendKind.POST)
+    clock = ManualClock(at(time(9, 14)))
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends)
+
+    await scheduler.step()
+
+    assert leg.calls == [(GROUP, 1)]
+
+
+# --- a slot that the overnight queue takes -----------------------------------
+
+
+async def test_a_slot_asks_the_overnight_queue_before_its_own_pool(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """Section 6: what broke while she slept goes out ahead of everything else in
+    the queue, and the morning slot is where it goes."""
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    clock = ManualClock(at(time(9, 14)))
+    watch = StubWatch(clock, claims=POSTED_ITEM)
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends, breaking=watch)
+
+    await scheduler.step()
+
+    assert watch.claims == 1
+    assert leg.calls == [], "the slot was already spoken for"
+    plan = await plans.plan_on(WEDNESDAY)
+    assert plan is not None
+    assert plan.slots[0].state is SlotState.POSTED
+
+
+async def test_a_slot_with_nothing_waiting_posts_from_the_pool_as_usual(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    clock = ManualClock(at(time(9, 14)))
+    watch = StubWatch(clock)
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends, breaking=watch)
+
+    await scheduler.step()
+
+    assert watch.claims == 1
+    assert leg.calls == [(GROUP, 1)]
 
 
 # --- the real news leg, driven by the real scheduler -------------------------

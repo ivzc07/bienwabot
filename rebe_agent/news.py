@@ -38,7 +38,9 @@ can act on.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -179,6 +181,22 @@ class NewsLeg:
         self._filters = filters or Filters()
         self._ranking = ranking or Ranking()
 
+    @property
+    def filters(self) -> Filters:
+        """The quality gates this leg curates by.
+
+        Readable because the override leg classifies tiers against the same
+        points floor. Two copies of that number - one that decides what is worth
+        ranking and one that decides what is breaking news - would drift, and the
+        drift would show up as Rebe treating an ordinary story as the day's big one.
+        """
+        return self._filters
+
+    @property
+    def ranking(self) -> Ranking:
+        """How this leg trades the three signals off. Read for the same reason."""
+        return self._ranking
+
     async def run(self, chat: str, *, limit: int = 1) -> list[Posted]:
         """Post up to `limit` fresh items into `chat`, best first.
 
@@ -205,7 +223,7 @@ class NewsLeg:
                 logger.debug("already posted: %s", item.canonical_url)
                 continue
             try:
-                sent.append(await self._post(chat, item))
+                sent.append(await self.post_one(chat, item))
             except BrainError as exc:
                 # The brain itself is the problem - the endpoint, or the day's
                 # call ceiling - so the next candidate would fail the same way.
@@ -230,7 +248,29 @@ class NewsLeg:
             logger.info("nothing to post this run")
         return sent
 
-    async def _post(self, chat: str, item: NewsItem) -> Posted:
+    async def unposted(self, now: datetime) -> list[NewsItem]:
+        """The whole curated shortlist, minus what the group has already seen.
+
+        `run` walks the ranked list lazily instead, because it only ever needs the
+        head of it and a token spent on an item that can never go out is a token
+        wasted. The override leg in `rebe_agent.breaking` needs the list itself:
+        "is the best thing left for the 22:00 slot weak" is a question about the
+        list rather than about its first entry.
+        """
+        return await self.fresh(await self._candidates.fetch(now), now)
+
+    async def fresh(self, pool: Iterable[NewsItem], now: datetime) -> list[NewsItem]:
+        """Curate `pool` and drop everything already posted, best first.
+
+        The whole free half of the pipeline in one call, so the overnight queue's
+        contents are judged in the morning by the same filters, ranker and
+        anti-repost gate as anything fetched that minute - including the freshness
+        window, which is what drops a queued item the night outlived.
+        """
+        ranked = shortlist(pool, now, filters=self._filters, ranking=self._ranking)
+        return [item for item in ranked if not await self._posted.knows(item)]
+
+    async def post_one(self, chat: str, item: NewsItem) -> Posted:
         """One item, from a model call to a row in the posted store."""
         post = await self._brain.ask(CallType.NEWS_SUMMARY, _prompt(item), NewsPost)
         text = render(post, item)

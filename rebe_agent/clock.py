@@ -19,8 +19,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Protocol
+
+
+def local_day(moment: datetime, zone: tzinfo) -> date:
+    """The day an instant falls on, in the agent's zone.
+
+    Everything the agent counts per day - twelve sends, eight posts, one rolled
+    plan - is a statement about the group's day in Mexico City rather than about
+    a UTC one. Three callers ask that question, so it is answered once here.
+    """
+    return moment.astimezone(zone).date()
 
 
 class Clock(Protocol):

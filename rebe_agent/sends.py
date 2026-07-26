@@ -67,6 +67,23 @@ class SendRecord:
     fingerprint: str
 
 
+def stable_fraction(send: SendRecord) -> float:
+    """A number in `[0, 1)` that is always the same for the same send.
+
+    This is what makes a jittered gap measured from a send a gap rather than a
+    lottery. Drawing fresh on each attempt would let a caller that retries every
+    minute keep rolling until it got the shortest gap on offer, so "75 to 90
+    minutes" would settle at 75 for everyone who asks twice. Reading the number
+    off the send instead means every attempt gets the same answer, and it
+    survives a restart because the fingerprint it comes from is in the database.
+
+    Two callers want that: the pacer, spacing one post from the last one, and the
+    override path, waiting out a conversation it keeps re-checking. One
+    implementation, living next to the fingerprint it reads.
+    """
+    return int(send.fingerprint[:8], 16) / 0x1_0000_0000
+
+
 class SendLog(Protocol):
     """Where the sends live. One implementation is Postgres; one is a list."""
 
@@ -88,8 +105,14 @@ class SendLog(Protocol):
         work out *when* the window frees up, not only that it is full.
         """
 
-    async def count_on(self, day: date) -> int:
-        """Sends on that local day, both legs together."""
+    async def count_on(self, day: date, *, kind: SendKind | None = None) -> int:
+        """Sends on that local day, both legs together unless one is named.
+
+        Both is what the envelope's daily ceiling counts. Naming a kind is what
+        the practical eight-post stop counts: that number is about how much of the
+        group's day is Rebe sharing links, and somebody asking her a question is
+        not her filling the day up.
+        """
 
     async def latest(
         self, *, kind: SendKind | None = None, chat: str | None = None
@@ -112,8 +135,10 @@ class InMemorySendLog:
             key=lambda send: send.sent_at,
         )
 
-    async def count_on(self, day: date) -> int:
-        return sum(1 for send in self._sends if send.day == day)
+    async def count_on(self, day: date, *, kind: SendKind | None = None) -> int:
+        return sum(
+            1 for send in self._sends if send.day == day and (kind is None or send.kind is kind)
+        )
 
     async def latest(
         self, *, kind: SendKind | None = None, chat: str | None = None
@@ -194,9 +219,14 @@ class PostgresSendLog:
             rows = await cursor.fetchall()
         return [_row_to_record(row) for row in rows]
 
-    async def count_on(self, day: date) -> int:
+    async def count_on(self, day: date, *, kind: SendKind | None = None) -> int:
         async with self._pool.connection() as conn:
-            cursor = await conn.execute("SELECT COUNT(*) FROM sends WHERE day = %s", (day,))
+            if kind is None:
+                cursor = await conn.execute("SELECT COUNT(*) FROM sends WHERE day = %s", (day,))
+            else:
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM sends WHERE day = %s AND kind = %s", (day, str(kind))
+                )
             row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
