@@ -128,11 +128,26 @@ def test_the_press_writing_about_a_launch_is_not_a_launch() -> None:
         "OpenAI lanza un modelo que corre local",
         "Presentamos un modelo que cabe en un telefono",
         "Nuestro modelo mas pequeno ya esta disponible",
+        "OpenAI lanzó su modelo mas pequeno",
     ],
 )
 def test_a_launch_reads_the_same_in_spanish(title: str) -> None:
     """The feeds are mostly English, the group is not, and an accent dropped by a
     feed must not decide a tier."""
+    assert classify(item(title=title, authority=1.0)) is Tier.HIGH
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Anthropic released Claude 5, its first offline model",
+        "Google announced a model that runs on a phone",
+        "OpenAI shipped a model that runs on your laptop",
+    ],
+)
+def test_a_launch_written_in_the_past_tense_is_still_a_launch(title: str) -> None:
+    """Which is how an aggregator titles the event the vendor titled "Introducing
+    X", and a rule that only read the present tense would miss half of them."""
     assert classify(item(title=title, authority=1.0)) is Tier.HIGH
 
 

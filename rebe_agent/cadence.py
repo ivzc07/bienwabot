@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 
+from rebe_agent.sends import SendRecord, stable_fraction
 from rebe_agent.tiers import Tier
 
 logger = logging.getLogger("rebe_agent.cadence")
@@ -229,6 +230,22 @@ class Cadence:
     def windows_for(self, day: date) -> tuple[PostWindow, ...]:
         """The window set that day belongs to."""
         return self.weekend if day.weekday() >= SATURDAY else self.weekday
+
+    def resume_after(self, send: SendRecord) -> datetime:
+        """When a post may follow one of her messages, per section 5.
+
+        Her last message of *any* kind, post or reply: what looks like two
+        programs is a link landing on top of a conversation, and the conversation
+        is whichever leg was talking.
+
+        The fraction is read off the send rather than drawn, so every caller that
+        asks about the same message gets the same answer - the drawn slot waiting
+        it out, the override watch coming round every half hour, and the process
+        that restarted in between. A fresh draw per attempt would hand a waiter
+        the *maximum* of its draws, since a longer one always pushes the answer
+        out again, and "ten to twenty minutes" would settle near twenty.
+        """
+        return send.sent_at + spread(*self.defer, stable_fraction(send))
 
     def deadline_for(self, slot: Slot, zone: tzinfo) -> datetime:
         """The first moment a slot is too late to post, so it is dropped instead.

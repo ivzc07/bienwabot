@@ -53,6 +53,7 @@ SATURDAY = date(2026, 7, 25)
 """The day the fixtures were recorded, so their timestamps mean what they say."""
 
 SUNDAY = date(2026, 7, 26)
+"""The morning after, for everything that breaks while she is asleep."""
 
 AFTERNOON = time(16, 30)
 """Mid-afternoon, between two windows: the hour section 4's worked example uses."""
@@ -635,6 +636,49 @@ async def test_only_the_strongest_of_two_overnight_items_takes_the_morning_slot(
     assert posted is not None and posted.item.source_id == "stronger"
     assert await stack.queue.waiting() == [], "the weaker one is demoted, not held for tomorrow"
     assert not await stack.posted.knows(weaker), "so it can still win a later window"
+
+
+async def test_the_look_at_08_20_leaves_the_queue_to_the_morning_slot() -> None:
+    """The hold lifts at 08:00 and the watch comes round every twenty to forty
+    minutes, so without this the night's story would go out at 08:20 as an
+    off-schedule extra - not "when the morning window opens, jittered as usual",
+    and a fifth post instead of the morning's own."""
+    clock = ManualClock(NIGHT)
+    stack = build(clock, Pool(overnight_item()))
+    await stack.breaking.check()
+
+    clock.set(at(time(8, 20), SUNDAY))
+    assert await stack.breaking.check() is None
+    assert stack.evolution.texts == []
+    assert len(await stack.queue.waiting()) == 1
+
+    clock.set(at(time(9, 14), SUNDAY))
+    assert await stack.breaking.claim_slot() is not None
+
+
+async def test_the_demoted_item_is_never_posted_as_an_override_afterwards() -> None:
+    """ "Fall back to normal tier" has to mean it: an item the morning passed over
+    is still a launch by the letter of the rule, and a look at 11:00 that treated
+    it as breaking news would give the day two overrides out of one night."""
+    clock = ManualClock(NIGHT)
+    weaker = overnight_item(
+        source="huggingface",
+        source_id="weaker",
+        title="Hugging Face lanza un espacio nuevo",
+        url="https://huggingface.co/blog/espacio",
+        authority=0.85,
+    )
+    stack = build(clock, Pool(overnight_item(source_id="stronger", authority=1.0), weaker))
+    await stack.breaking.check()
+    clock.set(at(time(9, 14), SUNDAY))
+    await stack.breaking.claim_slot()
+
+    clock.set(at(time(11, 0), SUNDAY))
+    assert await stack.breaking.check() is None
+    assert len(stack.evolution.texts) == 1
+
+    posted = await stack.leg.run(GROUP)
+    assert [one.item.source_id for one in posted] == ["weaker"], "it competes, as a normal item"
 
 
 async def test_the_morning_slot_is_only_claimed_once() -> None:

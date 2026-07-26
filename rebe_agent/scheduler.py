@@ -57,12 +57,12 @@ from rebe_agent.cadence import (
     moment_on,
     spread,
 )
-from rebe_agent.clock import Clock, RealSleeper, Sleeper
+from rebe_agent.clock import Clock, RealSleeper, Sleeper, local_day
 from rebe_agent.evolution import EvolutionError
 from rebe_agent.news import Posted
 from rebe_agent.pacer import SendRefusedError
 from rebe_agent.plans import PlanStore
-from rebe_agent.sends import SendLog
+from rebe_agent.sends import SendKind, SendLog
 
 logger = logging.getLogger("rebe_agent.scheduler")
 
@@ -141,7 +141,7 @@ class Scheduler:
         happened at each step.
         """
         now = self._clock.now()
-        today = self._local_day(now)
+        today = local_day(now, self._clock.zone)
         plan = await self._plans.plan_on(today)
 
         if plan is None:
@@ -196,9 +196,17 @@ class Scheduler:
 
     async def _fire(self, day: date, slot: Slot) -> None:
         """One slot, from due to settled: defer, drop, or post exactly once."""
+        posts = await self._sends.count_on(day, kind=SendKind.POST)
+        if posts >= self._cadence.daily_stop:
+            # Section 1's practical stop, which bounds the *day* rather than any
+            # one path into it. Only a day the overrides ran long can get here at
+            # all - four drawn slots cannot - and it is the one that most needs
+            # somebody to stop, since the alternative is drifting up towards the
+            # anti-ban ceiling on the day the news was busiest.
+            await self._drop(day, slot, f"{posts} posts today is where a normal day stops")
+            return
+
         deadline = self._cadence.deadline_for(slot, self._clock.zone)
-        # One deferral per message she sent, remembered across the waits below.
-        drawn: dict[datetime, timedelta] = {}
         while True:
             now = self._clock.now()
             if now >= deadline:
@@ -209,7 +217,7 @@ class Scheduler:
                 )
                 return
 
-            resume = await self._deferred_until(now, drawn)
+            resume = await self._deferred_until(now)
             if resume is None:
                 break
             if resume >= deadline:
@@ -259,29 +267,17 @@ class Scheduler:
         )
         await self._plans.settle(day, slot.window, SlotState.POSTED)
 
-    async def _deferred_until(
-        self, now: datetime, drawn: dict[datetime, timedelta]
-    ) -> datetime | None:
+    async def _deferred_until(self, now: datetime) -> datetime | None:
         """When a post may follow her last message, or `None` if it may go now.
 
-        Her last message of *any* kind, post or reply, per section 5: what looks
-        like two programs is a link landing on top of a conversation, and the
-        conversation is whichever leg was talking.
-
-        One draw per message, remembered in `drawn`, and a fresh one only when she
-        has said something new - which is the same discipline the pacer keeps for
-        the opposite reason. Redrawing on every pass would hand the wait the
-        *maximum* of its draws, since a longer draw always pushes the answer out
-        again, and "ten to twenty minutes" would settle near twenty.
+        Section 5's rule lives on the `Cadence`, because the override watch obeys
+        it too and two implementations of one rule would give the same message two
+        different answers.
         """
         last = await self._sends.latest()
         if last is None:
             return None
-        delay = drawn.get(last.sent_at)
-        if delay is None:
-            delay = spread(*self._cadence.defer, self._rng.random())
-            drawn[last.sent_at] = delay
-        resume = last.sent_at + delay
+        resume = self._cadence.resume_after(last)
         return resume if resume > now else None
 
     async def _drop(self, day: date, slot: Slot, why: str) -> None:
@@ -318,7 +314,3 @@ class Scheduler:
 
     def _dawn_on(self, day: date) -> datetime:
         return moment_on(day, DAWN, self._clock.zone)
-
-    def _local_day(self, moment: datetime) -> date:
-        """The day in the agent's zone. A plan is about the group's day."""
-        return moment.astimezone(self._clock.zone).date()

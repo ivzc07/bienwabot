@@ -105,8 +105,14 @@ class SendLog(Protocol):
         work out *when* the window frees up, not only that it is full.
         """
 
-    async def count_on(self, day: date) -> int:
-        """Sends on that local day, both legs together."""
+    async def count_on(self, day: date, *, kind: SendKind | None = None) -> int:
+        """Sends on that local day, both legs together unless one is named.
+
+        Both is what the envelope's daily ceiling counts. Naming a kind is what
+        the practical eight-post stop counts: that number is about how much of the
+        group's day is Rebe sharing links, and somebody asking her a question is
+        not her filling the day up.
+        """
 
     async def latest(
         self, *, kind: SendKind | None = None, chat: str | None = None
@@ -129,8 +135,10 @@ class InMemorySendLog:
             key=lambda send: send.sent_at,
         )
 
-    async def count_on(self, day: date) -> int:
-        return sum(1 for send in self._sends if send.day == day)
+    async def count_on(self, day: date, *, kind: SendKind | None = None) -> int:
+        return sum(
+            1 for send in self._sends if send.day == day and (kind is None or send.kind is kind)
+        )
 
     async def latest(
         self, *, kind: SendKind | None = None, chat: str | None = None
@@ -211,9 +219,14 @@ class PostgresSendLog:
             rows = await cursor.fetchall()
         return [_row_to_record(row) for row in rows]
 
-    async def count_on(self, day: date) -> int:
+    async def count_on(self, day: date, *, kind: SendKind | None = None) -> int:
         async with self._pool.connection() as conn:
-            cursor = await conn.execute("SELECT COUNT(*) FROM sends WHERE day = %s", (day,))
+            if kind is None:
+                cursor = await conn.execute("SELECT COUNT(*) FROM sends WHERE day = %s", (day,))
+            else:
+                cursor = await conn.execute(
+                    "SELECT COUNT(*) FROM sends WHERE day = %s AND kind = %s", (day, str(kind))
+                )
             row = await cursor.fetchone()
         return int(row[0]) if row else 0
 

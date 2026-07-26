@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from datetime import date, datetime, time
+from datetime import date, datetime
 
 from rebe_agent.brain import BrainError
 from rebe_agent.cadence import (
@@ -56,18 +56,16 @@ from rebe_agent.cadence import (
     Slot,
     SlotState,
     minutes,
-    moment_on,
-    spread,
 )
-from rebe_agent.clock import Clock
+from rebe_agent.clock import Clock, local_day
 from rebe_agent.curate import score
 from rebe_agent.evolution import EvolutionError
 from rebe_agent.items import NewsItem
 from rebe_agent.news import NewsLeg, Posted, PostRejectedError
-from rebe_agent.overnight import OvernightQueue
+from rebe_agent.overnight import OvernightQueue, source_keys
 from rebe_agent.pacer import SendRefusedError
 from rebe_agent.plans import PlanStore
-from rebe_agent.sends import SendKind, SendLog, stable_fraction
+from rebe_agent.sends import SendKind, SendLog
 from rebe_agent.tiers import DEFAULT_BAR, Tier, TierBar, classify, weak
 
 logger = logging.getLogger("rebe_agent.breaking")
@@ -79,8 +77,6 @@ Numbered rather than dated because the plan's unique key is `(day, window)`, so
 two big stories on one Tuesday need two names - and a name a human reading the
 table understands is worth more than an opaque one.
 """
-
-MIDNIGHT = time(0, 0)
 
 
 class Breaking:
@@ -117,7 +113,18 @@ class Breaking:
         """
         now = self._clock.now()
         candidates = await self._leg.unposted(now)
-        big = [item for item in candidates if self._tier(item) is Tier.HIGH]
+        # The night's items are not breaking news to this path, whatever tier they
+        # would classify as. One is holding the morning slot and the rest were
+        # demoted when it went; posting either here would be the override leg
+        # taking back a decision section 6 gave to the morning window - and would
+        # put the night's story out at 08:20 rather than at a jittered time inside
+        # the morning window, which is the tell the whole rule exists to avoid.
+        spoken_for = source_keys(await self._queue.held())
+        big = [
+            item
+            for item in candidates
+            if item.source_key not in spoken_for and self._tier(item) is Tier.HIGH
+        ]
         if not big:
             return None
 
@@ -155,7 +162,7 @@ class Breaking:
             posted.item.canonical_url,
             landed.strftime("%H:%M"),
         )
-        day = self._local_day(landed)
+        day = local_day(landed, self._clock.zone)
         await self._record(day, landed)
         await self._prune(day, landed, [item for item in candidates if item is not posted.item])
         return posted
@@ -174,21 +181,23 @@ class Breaking:
         skipped slot, and this returns `None` so the slot falls back to its own
         pool rather than ending the day's loop on an exception it never sees.
 
-        The queue is emptied only after a post lands, so a slot that could not
-        take it leaves the night's story waiting for the next window.
+        The queue is demoted once the morning has been decided, one way or the
+        other: something went out, or nothing in it was worth a slot any more.
+        Neither of those is true of a send that was refused or that broke, so
+        those leave the night's story waiting for the next window.
         """
-        held = await self._queue.waiting()
-        if not held:
+        waiting = await self._queue.waiting()
+        if not waiting:
             return None
 
         now = self._clock.now()
         # Through the curator again, on this morning's clock: a queued item that
         # went stale overnight, or that has since been posted by a normal slot,
         # is not the thing that was worth holding.
-        ranked = await self._leg.fresh(held, now)
+        ranked = await self._leg.fresh(waiting, now)
         if not ranked:
             logger.info("nothing in the overnight queue is still worth the morning slot")
-            await self._queue.clear()
+            await self._queue.demote()
             return None
 
         try:
@@ -204,7 +213,7 @@ class Breaking:
             minutes(now - posted.item.published_at),
             len(ranked) - 1,
         )
-        await self._queue.clear()
+        await self._queue.demote()
         return posted
 
     def _tier(self, item: NewsItem) -> Tier:
@@ -266,21 +275,19 @@ class Breaking:
         day is Rebe sharing links, while replies are somebody else starting the
         conversation. The envelope counts them together, and that is its job.
         """
-        since = moment_on(self._local_day(now), MIDNIGHT, self._clock.zone)
-        return sum(1 for send in await self._sends.since(since) if send.kind is SendKind.POST)
+        return await self._sends.count_on(local_day(now, self._clock.zone), kind=SendKind.POST)
 
     async def _deferred_until(self, now: datetime) -> datetime | None:
         """When a post may follow her last message of any kind, or `None` for now.
 
-        Section 5, the same rule and the same range the scheduler applies to a
-        drawn slot. The fraction is read off the send rather than drawn, so a
-        watch that comes round every half hour gets the same answer each time
-        instead of rolling for a shorter wait until it gets one.
+        Section 5's rule, off the same `Cadence` the drawn slots read it from, so
+        a big story and an ordinary one wait out the same conversation for the
+        same length of time.
         """
         last = await self._sends.latest()
         if last is None:
             return None
-        resume = last.sent_at + spread(*self._cadence.defer, stable_fraction(last))
+        resume = self._cadence.resume_after(last)
         return resume if resume > now else None
 
     async def _record(self, day: date, now: datetime) -> None:
@@ -289,6 +296,11 @@ class Breaking:
         The plan is the record of the day, so a day that went to five posts has to
         say five. `closes` is the moment itself: an override has no window to
         drift past, having never been drawn into one.
+
+        This can register a day the roll has not reached yet only if an override
+        ever posts before 06:00, and it cannot: everything before 08:00 is queued
+        rather than posted, and the roll runs two hours before that. The ordering
+        is what keeps a day from ever looking rolled when all it has is this row.
         """
         plan = await self._plans.plan_on(day)
         taken = (
@@ -342,7 +354,3 @@ class Breaking:
                 else "nothing at all",
             )
             await self._plans.settle(day, slot.window, SlotState.PRUNED)
-
-    def _local_day(self, moment: datetime) -> date:
-        """The day in the agent's zone. A plan is about the group's day."""
-        return moment.astimezone(self._clock.zone).date()

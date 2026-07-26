@@ -55,11 +55,11 @@ import asyncio
 import logging
 import random
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from enum import StrEnum
 from typing import TypeVar
 
-from rebe_agent.clock import Clock, RealSleeper, Sleeper
+from rebe_agent.clock import Clock, RealSleeper, Sleeper, local_day
 from rebe_agent.evolution import COMPOSING, PAUSED, EvolutionError, EvolutionSender
 from rebe_agent.pause import NeverPaused, Pause
 from rebe_agent.sends import SendKind, SendLog, SendRecord, fingerprint, stable_fraction
@@ -306,7 +306,7 @@ class Pacer:
                 retry_after=recent[0].sent_at + HOUR - now,
             )
 
-        day = self._local_day(now)
+        day = local_day(now, self._clock.zone)
         today = await self._log.count_on(day)
         if today >= self._envelope.sends_per_day:
             raise SendRefusedError(
@@ -422,7 +422,7 @@ class Pacer:
         await self._log.record(
             SendRecord(
                 sent_at=at,
-                day=self._local_day(at),
+                day=local_day(at, self._clock.zone),
                 kind=kind,
                 chat=chat,
                 fingerprint=fingerprint(text),
@@ -483,10 +483,6 @@ class Pacer:
     def _jittered(self, milliseconds: float) -> float:
         """A beat around `milliseconds`, never negative."""
         return max(self._rng.gauss(milliseconds, milliseconds * self._typing.jitter_ratio), 0.0)
-
-    def _local_day(self, moment: datetime) -> date:
-        """The day in the agent's zone. "Twelve a day" is about the group's day."""
-        return moment.astimezone(self._clock.zone).date()
 
 
 def _spread(low: _Spreadable, high: _Spreadable, fraction: float) -> _Spreadable:

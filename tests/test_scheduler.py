@@ -137,13 +137,19 @@ def make_scheduler(
     return scheduler, sleeper
 
 
-async def seed_send(sends: InMemorySendLog, when: datetime, *, text: str = "ahi va") -> None:
+async def seed_send(
+    sends: InMemorySendLog,
+    when: datetime,
+    *,
+    text: str = "ahi va",
+    kind: SendKind = SendKind.REPLY,
+) -> None:
     """One message Rebe already sent, as a restart would find it in the log."""
     await sends.record(
         SendRecord(
             sent_at=when,
             day=when.astimezone(MEXICO_CITY).date(),
-            kind=SendKind.REPLY,
+            kind=kind,
             chat=GROUP,
             fingerprint=fingerprint(text),
         )
@@ -714,6 +720,44 @@ async def test_a_loop_with_no_override_wired_waits_exactly_as_long_as_it_planned
     await scheduler.step()
 
     assert clock.now() == at(time(19, 2))
+
+
+async def test_a_drawn_slot_stops_at_eight_posts_like_everything_else(
+    plans: InMemoryPlanStore, sends: InMemorySendLog, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The practical stop bounds the day, not one path into it. Only a day the
+    overrides ran long can reach it - four drawn slots cannot - and that is the
+    day that most needs somebody to stop rather than drift at the ceiling."""
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    for hour in range(8):
+        await seed_send(sends, at(time(hour, 0)), text=f"la numero {hour}", kind=SendKind.POST)
+    clock = ManualClock(at(time(9, 14)))
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends)
+
+    with caplog.at_level(logging.INFO):
+        await scheduler.step()
+
+    plan = await plans.plan_on(WEDNESDAY)
+    assert plan is not None
+    assert plan.slots[0].state is SlotState.DROPPED
+    assert leg.calls == []
+    assert "where a normal day stops" in caplog.text
+
+
+async def test_seven_posts_still_leaves_room_for_the_eighth(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    for hour in range(7):
+        await seed_send(sends, at(time(hour, 0)), text=f"la numero {hour}", kind=SendKind.POST)
+    clock = ManualClock(at(time(9, 14)))
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends)
+
+    await scheduler.step()
+
+    assert leg.calls == [(GROUP, 1)]
 
 
 # --- a slot that the overnight queue takes -----------------------------------

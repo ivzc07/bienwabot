@@ -69,8 +69,10 @@ class TierBar:
 
     A parameter and not a list of vendors, so a feed added to `rebe_agent.feeds`
     is classified on the weight it already carries and the tiers never have to
-    know the source list exists. The shipped list puts OpenAI, DeepMind, Google
-    AI and Hugging Face above this and the press below it.
+    know the source list exists. The shipped list puts OpenAI, DeepMind, Google AI
+    and Hugging Face above this; Microsoft Research sits just below it, which is
+    the right answer for a blog that publishes research rather than launches, and
+    the tech press is further down again.
     """
 
     weak_score: float = 0.5
@@ -91,37 +93,52 @@ LAUNCH_WORDS: tuple[str, ...] = (
     "introducing",
     "introduces",
     "introduce",
+    "introduced",
     "launch",
     "launches",
     "launching",
+    "launched",
     "announcing",
     "announces",
     "announce",
+    "announced",
     "releasing",
     "releases",
     "release",
+    "released",
     "ships",
     "shipping",
+    "shipped",
     "unveils",
     "unveiling",
+    "unveiled",
     "now available",
     "available today",
     "rolling out",
+    "rolled out",
     "lanza",
+    "lanzo",
     "lanzan",
     "lanzamos",
     "lanzamiento",
     "presenta",
+    "presento",
     "presentamos",
     "estrena",
+    "estreno",
     "ya disponible",
     "esta disponible",
 )
 """What a headline says when something shipped, in both of the group's languages.
 
-Every form is written out rather than stemmed: a stemmer would be a dependency
-and a second thing to be wrong, and the set of ways an announcement announces
-itself is small enough to read.
+Every form is written out rather than stemmed - present and past, singular and
+plural, first person and third: a stemmer would be a dependency and a second
+thing to be wrong, and the set of ways an announcement announces itself is small
+enough to read. The past tense earns its place: "Anthropic released Claude 5" is
+how the aggregators title the same event the vendor titled "Introducing Claude 5".
+
+Written without accents because that is the form `folded` reduces a headline to,
+so "lanzo" is what "lanzó" arrives as.
 """
 
 COMMENTARY_WORDS: tuple[str, ...] = (
@@ -193,9 +210,9 @@ def _says(text: str, phrases: tuple[str, ...]) -> bool:
     """Whether any phrase appears in `text` as whole words.
 
     `folded` has already reduced the headline to space-separated words, so
-    padding both sides is the whole of word-boundary matching here - and it is
-    what stops "release" from matching inside "released" only by accident, or
-    "why" from matching inside "whywhat".
+    padding both sides is the whole of word-boundary matching here. Whole words
+    rather than substrings on purpose: "why" must not match inside "whyte", and
+    every inflection that should match is written out in the lists above instead.
     """
     padded = f" {text} "
     return any(f" {phrase} " in padded for phrase in phrases)

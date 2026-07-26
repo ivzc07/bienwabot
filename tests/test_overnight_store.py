@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import psycopg
 import pytest
 
-from rebe_agent.overnight import PostgresOvernightQueue
+from rebe_agent.overnight import RETENTION, PostgresOvernightQueue
 from tests.support import MEXICO_CITY, item
 
 DATABASE_URL = os.environ.get("REBE_TEST_DATABASE_URL", "")
@@ -125,17 +125,46 @@ async def test_the_queue_survives_the_process_that_filled_it(
     assert sorted(one.source_id for one in held) == ["42000001", "openai-launch"]
 
 
-async def test_clearing_the_queue_empties_it_for_good(queue: PostgresOvernightQueue) -> None:
+async def test_demoting_the_queue_leaves_nothing_holding_a_slot(
+    queue: PostgresOvernightQueue,
+) -> None:
     """The morning takes the strongest and the rest fall back to normal tier, so
-    nothing is left holding them into a second night."""
+    nothing is left holding a slot into a second night."""
     await queue.queue(LAUNCH, NIGHT)
     await queue.queue(TOP_STORY, NIGHT)
 
-    await queue.clear()
+    await queue.demote()
 
     assert await queue.waiting() == []
     async with PostgresOvernightQueue.connect(DATABASE_URL) as after_restart:
         assert await after_restart.waiting() == []
+
+
+async def test_a_demoted_item_is_still_remembered_as_the_nights_business(
+    queue: PostgresOvernightQueue,
+) -> None:
+    """Marked and not deleted, and it has to survive a restart in that state: a
+    demoted item deleted at 09:14 would be classified high tier by the 09:40 look
+    and posted as an override, which is the opposite of falling back."""
+    await queue.queue(LAUNCH, NIGHT)
+    await queue.demote()
+
+    async with PostgresOvernightQueue.connect(DATABASE_URL) as after_restart:
+        held = await after_restart.held()
+
+    assert [one.source_id for one in held] == ["openai-launch"]
+
+
+async def test_rows_older_than_the_retention_window_are_swept_up(
+    queue: PostgresOvernightQueue,
+) -> None:
+    """Nothing needs a job of its own to keep the table small: by the time a row
+    is this old the curator's freshness window had dropped the item days ago."""
+    await queue.queue(LAUNCH, NIGHT)
+
+    await queue.queue(TOP_STORY, NIGHT + RETENTION + timedelta(hours=1))
+
+    assert [one.source_id for one in await queue.held()] == ["42000001"]
 
 
 async def test_the_night_comes_back_in_the_order_it_arrived(
