@@ -81,8 +81,10 @@ DeepSeek has no embeddings endpoint, so there is no semantic near-duplicate laye
 What survives is filtered for freshness, a usable title and a resolvable link, then ranked on source authority, HN points and comments, and recency decay - all of it before a single token is spent.
 
 The top item gets one DeepSeek call, which returns a framing word and one line and never a link.
-The canonical URL is appended afterwards by the code, which is what makes "it never invents or shortens a link" a property rather than a hope.
-The framing line may only restate the source item: any number the source did not supply, any link, a second emoji, or an answer too long to be a WhatsApp message is rejected and the item is dropped without posting.
+The link is appended afterwards by the code, which is what makes "it never invents or shortens a link" a property rather than a hope.
+What gets appended is the article's own address minus the tracking, not the canonical key: canonicalising forces https and drops a `www.`, which is right for comparing two links and would be an edit to an address somebody is about to tap.
+The framing line may only restate the source item: any number the source did not supply, any link, a second emoji, or an answer too long to be a WhatsApp message is rejected and that item is dropped without posting.
+A rejected answer moves the run on to the next candidate, up to a small bound; a brain failure ends the run, because the next candidate would fail the same way.
 
 Then the post goes out through the shared pacer, and only after that is the item written to the posted store - so a failed send costs a re-fetch rather than losing the item for good.
 `--limit N` caps how many items one run may post; the default is one, and the pacer's post-to-post gap governs the spacing regardless.

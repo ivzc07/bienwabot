@@ -24,6 +24,7 @@ from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
+from rebe_agent.curate import DEFAULT_FILTERS
 from rebe_agent.db import open_pool
 from rebe_agent.evolution import EvolutionError, build_client
 from rebe_agent.feeds import WebCandidates
@@ -224,12 +225,15 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
         await sends.ensure_schema()
         await posted.ensure_schema()
 
+        # One `Filters` for both halves: the fetch asks each source for exactly
+        # what the curator would have kept, rather than for its own idea of it.
         leg = NewsLeg(
             build_brain(settings, clock, usage),
             Pacer(evolution, sends, clock),
-            WebCandidates(web),
+            WebCandidates(web, filters=DEFAULT_FILTERS),
             posted,
             clock,
+            filters=DEFAULT_FILTERS,
         )
         try:
             sent = await leg.run(chat, limit=limit)

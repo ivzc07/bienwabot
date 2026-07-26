@@ -12,10 +12,18 @@ Checked first because a token spent on an item that can never go out is a token
 wasted; written last because the store is a record of what the group *saw*, and
 an item burnt by a transport blip nobody witnessed would be lost for good.
 
+The ticket puts that check "before anything is ranked". It runs just after,
+walking the ranked list until an unposted item turns up, because ranking and
+dropping commute - the top *unposted* item is the same either way - and this
+order asks the database about one item instead of about the whole pool.
+
 **The model never sees the URL and never writes one.** The post is assembled here:
-the model supplies a framing word and one line, and the canonical URL is appended
-by this module. That is what makes "it never invents or shortens a link" a
-property of the code rather than a hope about the prompt.
+the model supplies a framing word and one line, and the link is appended by this
+module. That is what makes "it never invents or shortens a link" a property of
+the code rather than a hope about the prompt. The link appended is the article's
+own address with the tracking taken off, not the canonical key - canonicalising
+forces https and drops a `www.`, which is right for comparing two links and is an
+edit to an address somebody is about to tap.
 
 What the model *does* write is bounded by the anti-hallucination rule in
 `docs/wayfinder/reply-policy-spec.md`: the framing line may only restate what the
@@ -53,6 +61,14 @@ MAX_FRAMING_CHARS = 240
 
 MAX_EMOJI = 1
 """The persona spec dials Rebe down to 0-1 per message, often none."""
+
+REJECTIONS_PER_RUN = 2
+"""How many unusable answers a run pays for before it gives up.
+
+A rejected post is about the item - a headline the model could only describe
+by inventing a number - so the run tries the next candidate rather than ending.
+Bounded all the same: without a bound, a bad day would spend the shortlist.
+"""
 
 INSTRUCTIONS = """
 Eres Rebe: mexicana, 28 años, te clavas con la IA y el diseño. Eres una integrante
@@ -115,14 +131,19 @@ def render(post: NewsPost, item: NewsItem) -> str:
         raise PostRejectedError(f"{len(framing)} characters is not a WhatsApp message")
     if _LINKISH.search(framing):
         raise PostRejectedError("the model wrote a link; links are appended here, never generated")
-    if emoji_count(framing) > MAX_EMOJI:
-        raise PostRejectedError(f"{emoji_count(framing)} emoji, and Rebe sends at most {MAX_EMOJI}")
+
+    emoji = emoji_count(framing)
+    if emoji > MAX_EMOJI:
+        raise PostRejectedError(f"{emoji} emoji, and Rebe sends at most {MAX_EMOJI}")
 
     invented = _invented_numbers(framing, item.grounding)
     if invented:
         raise PostRejectedError(f"the source never mentions {', '.join(invented)}")
 
-    return f"{framing}\n{item.canonical_url}"
+    # `link`, not `canonical_url`: the canonical form is the key two candidates
+    # are compared on, and forcing https or dropping a `www.` to make that key
+    # would be editing an address somebody is about to tap.
+    return f"{framing}\n{item.link}"
 
 
 _LINKISH = re.compile(r"https?://|www\.|\.com\b|\.mx\b|\.ai\b|\.org\b", re.IGNORECASE)
@@ -131,28 +152,50 @@ _LINKISH = re.compile(r"https?://|www\.|\.com\b|\.mx\b|\.ai\b|\.org\b", re.IGNOR
 _DIGITS = re.compile(r"\d+")
 
 _EMOJI = "So"
-"""Unicode's "symbol, other" - the category the emoji themselves live in."""
+"""Unicode's "symbol, other" - the category most emoji live in."""
 
 _MODIFIER = "Sk"
 """"Symbol, modifier": the skin tones, which colour the emoji before them."""
 
+_EMOJI_PRESENTATION = "\ufe0f"
+"""U+FE0F. Turns an ordinary character into its emoji form: `!!` becomes an emoji."""
+
 _JOINERS = frozenset("\u200d\ufe0f\ufe0e")
 """Zero-width joiner and the variation selectors, which glue two emoji into one."""
+
+_REGIONAL_INDICATORS = frozenset(chr(point) for point in range(0x1F1E6, 0x1F200))
+"""The A-Z letters flags are built from. Two of them are one flag, not two emoji."""
 
 
 def emoji_count(text: str) -> int:
     """How many emoji a reader would see.
 
-    Counted the way a reader counts them, not the way Unicode stores them: a
-    family or a skin-toned wave is several code points and one picture, and the
-    rule the persona spec sets - at most one - is about pictures. Two emoji side
-    by side with nothing between them are still two.
+    Counted the way a reader counts them, not the way Unicode stores them, because
+    the rule the persona spec sets - at most one, usually none - is about pictures
+    on a screen. Three cases make that different from counting code points:
+
+    - A joined sequence (a family, a skin-toned wave) is one picture.
+    - A flag is *two* regional-indicator letters and one picture, so counting code
+      points would refuse a perfectly ordinary "viva mexico \ud83c\uddf2\ud83c\uddfd".
+    - A character followed by U+FE0F is an emoji whatever its own category says,
+      so `\u203c\ufe0f` counts even though `\u203c` alone is punctuation.
+
+    Two emoji side by side with nothing between them are still two.
     """
     count = 0
     joined = False
-    for character in text:
+    half_a_flag = False
+    for index, character in enumerate(text):
+        if character in _REGIONAL_INDICATORS:
+            # The second letter completes the flag the first one opened.
+            count += not (joined or half_a_flag)
+            half_a_flag = not half_a_flag
+            joined = False
+            continue
+
+        half_a_flag = False
         category = unicodedata.category(character)
-        if category == _EMOJI:
+        if category == _EMOJI or text[index + 1 : index + 2] == _EMOJI_PRESENTATION:
             count += not joined
             joined = False
         elif character in _JOINERS:
@@ -217,6 +260,7 @@ class NewsLeg:
         logger.info("%d candidates, %d after filtering and dedup", len(pool), len(ranked))
 
         sent: list[Posted] = []
+        rejected = 0
         for item in ranked:
             if len(sent) >= limit:
                 break
@@ -225,13 +269,20 @@ class NewsLeg:
                 continue
             try:
                 sent.append(await self._post(chat, item))
-            except (BrainError, PostRejectedError) as exc:
-                # The item is dropped and the run ends rather than walking on to
-                # the next candidate: a model that just produced an unusable post
-                # is not more likely to produce a good one on the next try, and
-                # the call budget is worth more than one extra attempt.
-                logger.info("dropping %s: %s", item.canonical_url, exc)
+            except BrainError as exc:
+                # The brain itself is the problem - the endpoint, or the day's
+                # call ceiling - so the next candidate would fail the same way.
+                logger.info("the brain gave no answer for %s: %s", item.canonical_url, exc)
                 break
+            except PostRejectedError as exc:
+                # This answer is unusable, which is about this item and not about
+                # the model, so the run moves on. Bounded, because a run that kept
+                # paying for rejected answers would be the loop the budget fears.
+                rejected += 1
+                logger.info("dropping %s: %s", item.canonical_url, exc)
+                if rejected >= REJECTIONS_PER_RUN:
+                    logger.info("%d unusable answers in a row; ending the run", rejected)
+                    break
             except SendRefusedError:
                 if not sent:
                     raise

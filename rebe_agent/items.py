@@ -70,6 +70,28 @@ duplicate it was trying to prevent. `?id=`, `?p=` and friends are the article.
 """
 
 
+def shareable_url(raw: str) -> str:
+    """The address the group gets: the source's own link, minus the tracking.
+
+    Deliberately *not* the canonical form. Canonicalising forces https, drops a
+    `www.` and reorders the query, all of which are right for comparing two links
+    and wrong for following one: a host that serves only `www.`, or only http,
+    would get a dead link posted to it. So the article is shared as its publisher
+    wrote it, with the campaign parameters and the fragment taken off, and the
+    rewriting is kept to the key nobody ever clicks.
+    """
+    parts = urlsplit(raw.strip())
+    if parts.scheme.lower() not in WEB_SCHEMES or not parts.netloc:
+        return ""
+    kept = [
+        (name, value)
+        for name, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not _is_tracking(name)
+    ]
+    # Left in the publisher's order, unlike the key: this one is read by people.
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, urlencode(kept), ""))
+
+
 def canonical_url(raw: str) -> str:
     """The comparable form of a link, or `""` if it is not a resolvable article.
 
@@ -166,6 +188,11 @@ class NewsItem:
         return canonical_url(self.url)
 
     @property
+    def link(self) -> str:
+        """What actually gets posted. Compared on `canonical_url`, followed on this."""
+        return shareable_url(self.url)
+
+    @property
     def title_hash(self) -> str:
         """Layer 3: the same story reposted under a different URL."""
         return title_hash(self.title)
@@ -180,3 +207,33 @@ class NewsItem:
         looking at different things.
         """
         return f"{self.title}\n{self.summary}".strip()
+
+
+class SeenItems:
+    """Items already accounted for, and the one place "already" is decided.
+
+    Two callers ask that question - the curator collapsing duplicates inside one
+    run, and the in-memory posted store answering across runs - and a fourth
+    layer added to one and not the other would be a repost nobody could explain.
+    So the rule lives with the keys it reads rather than being spelled out at each
+    call site. The Postgres store restates it in SQL because SQL is where its copy
+    of the rule has to run; those three columns are the same three keys.
+    """
+
+    def __init__(self) -> None:
+        self._sources: set[tuple[str, str]] = set()
+        self._urls: set[str] = set()
+        self._titles: set[str] = set()
+
+    def knows(self, item: NewsItem) -> bool:
+        """True if any one of the three layers has seen this item before."""
+        return (
+            item.source_key in self._sources
+            or item.canonical_url in self._urls
+            or item.title_hash in self._titles
+        )
+
+    def remember(self, item: NewsItem) -> None:
+        self._sources.add(item.source_key)
+        self._urls.add(item.canonical_url)
+        self._titles.add(item.title_hash)
