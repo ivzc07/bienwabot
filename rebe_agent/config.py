@@ -71,6 +71,7 @@ class Settings(BaseModel):
     evolution_api_url: str = Field(alias="EVOLUTION_API_URL")
     evolution_api_key: SecretStr = Field(alias="EVOLUTION_API_KEY")
     evolution_instance: str = Field(default=DEFAULT_INSTANCE, alias="EVOLUTION_INSTANCE")
+    rebe_group_jid: str = Field(alias="REBE_GROUP_JID")
     webhook_secret: SecretStr = Field(alias="WEBHOOK_SECRET")
     rebe_database_url: SecretStr = Field(alias="REBE_DATABASE_URL")
     telegram_bot_token: SecretStr = Field(alias="TELEGRAM_BOT_TOKEN")
@@ -93,7 +94,7 @@ class Settings(BaseModel):
         )
         return value
 
-    @field_validator("evolution_instance", "telegram_chat_id")
+    @field_validator("evolution_instance", "rebe_group_jid", "telegram_chat_id")
     @classmethod
     def _check_not_blank(cls, value: str) -> str:
         stripped = value.strip()

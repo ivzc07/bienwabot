@@ -13,9 +13,10 @@ import asyncio
 import logging
 import os
 import signal
-import threading
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
+from dataclasses import dataclass
 from types import FrameType
 
 import httpx
@@ -25,12 +26,14 @@ from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
 from rebe_agent.curate import DEFAULT_FILTERS
-from rebe_agent.db import open_pool
-from rebe_agent.evolution import EvolutionError, build_client
+from rebe_agent.db import Pool, open_pool
+from rebe_agent.evolution import EvolutionError, EvolutionSender, build_client
 from rebe_agent.feeds import WebCandidates
 from rebe_agent.news import NewsLeg
 from rebe_agent.pacer import Pacer, SendRefusedError
+from rebe_agent.plans import PostgresPlanStore
 from rebe_agent.posted import PostgresPostedStore
+from rebe_agent.scheduler import Scheduler
 from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
 
@@ -203,12 +206,54 @@ async def say_once(settings: Settings, clock: Clock, chat: str, text: str, kind:
     return EXIT_OK
 
 
+@dataclass(frozen=True, slots=True)
+class NewsStack:
+    """The news leg and the two stores the scheduler leg reads alongside it.
+
+    Every store lives in the same `rebe` database, so they share one pool rather
+    than opening four.
+    """
+
+    leg: NewsLeg
+    sends: PostgresSendLog
+    plans: PostgresPlanStore
+
+
+async def build_news_stack(
+    settings: Settings,
+    clock: Clock,
+    pool: Pool,
+    evolution: EvolutionSender,
+    web: httpx.AsyncClient,
+) -> NewsStack:
+    """Wire the whole news path against one pool, tables included."""
+    usage = PostgresUsageStore(pool)
+    sends = PostgresSendLog(pool)
+    posted = PostgresPostedStore(pool)
+    plans = PostgresPlanStore(pool, settings.zone)
+    await usage.ensure_schema()
+    await sends.ensure_schema()
+    await posted.ensure_schema()
+    await plans.ensure_schema()
+
+    # One `Filters` for both halves: the fetch asks each source for exactly
+    # what the curator would have kept, rather than for its own idea of it.
+    leg = NewsLeg(
+        build_brain(settings, clock, usage),
+        Pacer(evolution, sends, clock),
+        WebCandidates(web, filters=DEFAULT_FILTERS),
+        posted,
+        clock,
+        filters=DEFAULT_FILTERS,
+    )
+    return NewsStack(leg=leg, sends=sends, plans=plans)
+
+
 async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int) -> int:
     """One turn of the news leg: the open web to the group, once, on demand.
 
-    Every store lives in the same `rebe` database, so they share one pool rather
-    than opening three. When this runs is the cadence ticket's decision; this
-    command is what that ticket will eventually be scheduling.
+    The same leg the scheduler fires on a drawn time, run by hand: this is how an
+    operator proves the path end to end without waiting for a window to open.
 
     Posting nothing exits cleanly. On a healthy day the second run in a row has
     nothing left to say, and an operator should not have to read that as a fault.
@@ -218,25 +263,9 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
         build_client(settings) as evolution,
         httpx.AsyncClient() as web,
     ):
-        usage = PostgresUsageStore(pool)
-        sends = PostgresSendLog(pool)
-        posted = PostgresPostedStore(pool)
-        await usage.ensure_schema()
-        await sends.ensure_schema()
-        await posted.ensure_schema()
-
-        # One `Filters` for both halves: the fetch asks each source for exactly
-        # what the curator would have kept, rather than for its own idea of it.
-        leg = NewsLeg(
-            build_brain(settings, clock, usage),
-            Pacer(evolution, sends, clock),
-            WebCandidates(web, filters=DEFAULT_FILTERS),
-            posted,
-            clock,
-            filters=DEFAULT_FILTERS,
-        )
+        stack = await build_news_stack(settings, clock, pool, evolution, web)
         try:
-            sent = await leg.run(chat, limit=limit)
+            sent = await stack.leg.run(chat, limit=limit)
         except SendRefusedError as exc:
             logger.error("the pacer refused the post. %s", exc)
             return EXIT_SEND_REFUSED
@@ -251,27 +280,71 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
     return EXIT_OK
 
 
-def run(settings: Settings, clock: Clock) -> int:
-    """Hold the process open until the platform stops it.
+async def serve_the_scheduler(settings: Settings, clock: Clock) -> int:
+    """The scheduler leg, running until the task is cancelled.
 
-    The news leg exists, but only on demand through `--post-news`: what puts it
-    on a timer is the cadence ticket. The webhook leg lands in a later one. So
-    this skeleton still only has to boot, stay up, and shut down on SIGTERM.
+    One long-running loop in this one process, per the single-replica invariant in
+    section 2.2 of the deployment spec. The webhook leg lands in a later ticket and
+    joins this process rather than a second one, because the pacer's ceilings span
+    both legs and a limiter cannot span two processes.
     """
-    apply_timezone(settings.timezone)
-    stopping = threading.Event()
+    async with (
+        open_pool(settings.rebe_database_url.get_secret_value()) as pool,
+        build_client(settings) as evolution,
+        httpx.AsyncClient() as web,
+    ):
+        stack = await build_news_stack(settings, clock, pool, evolution, web)
+        scheduler = Scheduler(stack.leg, settings.rebe_group_jid, stack.plans, stack.sends, clock)
+        logger.info("posting into %s", settings.rebe_group_jid)
+        await scheduler.serve()
+    return EXIT_OK
+
+
+def stop_on_signals(stopping: asyncio.Event) -> None:
+    """Turn SIGTERM and SIGINT into something the event loop can wait on.
+
+    `signal.signal` rather than the loop's own handler because that one is
+    POSIX-only, and the tests run on Windows.
+    """
+    loop = asyncio.get_running_loop()
 
     def _stop(signum: int, _frame: FrameType | None) -> None:
         logger.info("received %s, shutting down", signal.Signals(signum).name)
-        stopping.set()
+        loop.call_soon_threadsafe(stopping.set)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, _stop)
 
-    logger.info("no legs wired yet; idling as instance %s", settings.evolution_instance)
-    stopping.wait()
+
+async def serve(settings: Settings, clock: Clock) -> int:
+    """Run the legs until the platform stops the process.
+
+    A leg that ends on its own has broken, and its exception is deliberately let
+    out: the platform restarts the container, and a restart is safe precisely
+    because the day's plan is in the database rather than in this process.
+    """
+    stopping = asyncio.Event()
+    stop_on_signals(stopping)
+
+    serving = asyncio.create_task(serve_the_scheduler(settings, clock), name="scheduler")
+    halt = asyncio.create_task(stopping.wait(), name="stop")
+    done, _ = await asyncio.wait({serving, halt}, return_when=asyncio.FIRST_COMPLETED)
+
+    if serving in done:
+        halt.cancel()
+        return serving.result()
+
+    serving.cancel()
+    with suppress(asyncio.CancelledError):
+        await serving
     logger.info("rebe-agent stopped")
     return EXIT_OK
+
+
+def run(settings: Settings, clock: Clock) -> int:
+    """Boot the bot that runs itself: the dawn roll, and the day it draws."""
+    apply_timezone(settings.timezone)
+    return asyncio.run(serve(settings, clock))
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:

@@ -168,7 +168,7 @@ _REGIONAL_INDICATORS = frozenset(chr(point) for point in range(0x1F1E6, 0x1F200)
 
 
 def emoji_count(text: str) -> int:
-    """How many emoji a reader would see.
+    r"""How many emoji a reader would see.
 
     Counted the way a reader counts them, not the way Unicode stores them, because
     the rule the persona spec sets - at most one, usually none - is about pictures
