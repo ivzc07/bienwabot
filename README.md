@@ -188,6 +188,17 @@ There is no automatic swap to the backup number, ever.
 Auto-switching on a possibly-false ban signal would burn the only warm standby and leave the bot cold with no backup, so a permanent ban stops everything and waits for a human.
 Which instance is live is `EVOLUTION_INSTANCE`, read in one place and never written, and the swap is the manual procedure in the runbook.
 
+## Deploying it
+
+`rebe-agent` runs as a Coolify application built from this repo's Dockerfile, on the shared internal network, with no public FQDN and no published port: Evolution reaches it by container name and nothing else needs to reach it at all.
+The step-by-step go-live sequence - pairing the numbers, the per-instance webhooks, every environment variable, the Kuma monitor and the Telegram bot, and the three live checks that say it works - is [`docs/wayfinder/go-live-runbook.md`](docs/wayfinder/go-live-runbook.md).
+What is already provisioned, with the container names to address it by, is [`docs/wayfinder/bien-evo-provisioning.md`](docs/wayfinder/bien-evo-provisioning.md).
+
+**One replica. Never two.**
+The pacer's counters and the scheduler's idea of what is due both live in this process, so a second replica would roll its own posting day and double-fire every slot, and the two would each stay politely under twelve sends a day while between them sending twenty-four.
+The anti-ban envelope is a property of the number rather than of the container, and it only holds while there is one container.
+Scaling out is possible, but only after the limiter and the scheduler move onto a shared Postgres or Redis lock.
+
 ## Working on it
 
 ```sh
