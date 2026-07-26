@@ -302,9 +302,7 @@ def build_news_stack(
         clock,
         filters=DEFAULT_FILTERS,
     )
-    return NewsStack(
-        leg=leg, pacer=pacer, usage=usage, sends=sends, posted=posted, plans=plans
-    )
+    return NewsStack(leg=leg, pacer=pacer, usage=usage, sends=sends, posted=posted, plans=plans)
 
 
 async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int) -> int:
@@ -452,9 +450,7 @@ async def serve(settings: Settings, clock: Clock) -> int:
             evolution,
             memory,
         )
-        scheduler = Scheduler(
-            stack.leg, settings.rebe_group_jid, stack.plans, stack.sends, clock
-        )
+        scheduler = Scheduler(stack.leg, settings.rebe_group_jid, stack.plans, stack.sends, clock)
         server = EmbeddedServer(
             uvicorn.Config(
                 build_app(reply, settings.webhook_secret.get_secret_value()),
