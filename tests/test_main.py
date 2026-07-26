@@ -46,6 +46,18 @@ def test_a_missing_variable_exits_non_zero_and_names_it(
     assert "EVOLUTION_API_KEY" in "\n".join(record.getMessage() for record in caplog.records)
 
 
+def test_posting_news_needs_somewhere_to_post_it() -> None:
+    """Caught by argparse, before configuration is even read: a run that would
+    fetch, rank and summarise and then have nowhere to send is wasted money."""
+    with pytest.raises(SystemExit):
+        main(["--post-news"], env=dict(COMPLETE_ENV))
+
+
+def test_the_per_run_cap_must_be_a_number_of_posts() -> None:
+    with pytest.raises(SystemExit):
+        main(["--post-news", "--to", "1203@g.us", "--limit", "0"], env=dict(COMPLETE_ENV))
+
+
 def test_an_invalid_variable_exits_non_zero_and_explains(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
