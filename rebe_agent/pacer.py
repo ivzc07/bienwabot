@@ -254,6 +254,18 @@ class Pacer:
             await self._type_for(chat, typing_seconds)
             return await self._deliver(kind, chat, text, waited, typing_seconds)
 
+    async def paused(self) -> bool:
+        """Whether the switch says Rebe is meant to be silent right now.
+
+        A leg that has something to do *before* it sends - the reply leg marks
+        the message read - asks here rather than holding a switch of its own.
+        There is one switch, and it reaches every leg by reaching the one sender,
+        so a leg cannot be wired to a pacer that is paused and a switch that is
+        not. The send path reads it again anyway: this is an early out, not the
+        guarantee.
+        """
+        return (await self._pause.state()).paused
+
     async def _check_the_pause(self) -> None:
         """Refuse everything while the out-of-band switch is on.
 
