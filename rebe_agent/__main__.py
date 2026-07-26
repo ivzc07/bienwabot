@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import psycopg
+import uvicorn
 from psycopg_pool import PoolTimeout
 
 from rebe_agent import __version__
@@ -29,13 +30,16 @@ from rebe_agent.curate import DEFAULT_FILTERS
 from rebe_agent.db import Pool, open_pool
 from rebe_agent.evolution import EvolutionError, build_client
 from rebe_agent.feeds import WebCandidates
+from rebe_agent.memory import PostgresGroupMemory
 from rebe_agent.news import NewsLeg
 from rebe_agent.ops import OpsChannel, build_ops
 from rebe_agent.pacer import Pacer, SendRefusedError
 from rebe_agent.pause import Pause, PostgresPauseSwitch
 from rebe_agent.posted import PostgresPostedStore
+from rebe_agent.reply import ReplyLeg
 from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
+from rebe_agent.webhook import WEBHOOK_HOST, WEBHOOK_PORT, build_app
 
 EXIT_OK = 0
 EXIT_BAD_CONFIG = 2
@@ -339,14 +343,33 @@ async def log_the_soft_pause(pause: Pause) -> None:
         logger.info("the soft pause is off; sending is normal")
 
 
-async def serve(settings: Settings, clock: Clock) -> int:
-    """Hold the process open, with the ops channel running, until it is stopped.
+class EmbeddedServer(uvicorn.Server):
+    """Uvicorn with its signal handling left to the caller.
 
-    The two legs are still on demand - `--post-news` now, the cadence and webhook
-    tickets later - so what this loop carries today is the out-of-band channel:
-    the Kuma heartbeat, and the Telegram listener that carries the soft pause.
-    Both are the same shape as the legs will be, and the heartbeat proves this
-    loop is turning, which is the whole reason it is emitted from in here.
+    Uvicorn installs its own SIGTERM and SIGINT handlers over ours the moment it
+    starts serving, and they stop the server alone. That would leave the ops
+    channel beating away in a process that no longer answers a webhook, which is
+    the one shape of shutdown a maintainer must never see: Kuma stays green while
+    Rebe has gone deaf. One `stopping` event owns the whole process instead.
+    """
+
+    def install_signal_handlers(self) -> None:
+        return None
+
+
+async def serve(settings: Settings, clock: Clock) -> int:
+    """Hold the process open: the webhook leg and the ops channel, together.
+
+    One pool and one pacer across everything that sends. The pacer is built here,
+    with the soft pause and the watchtower already on it, because a limiter that
+    only some callers hold is not a limiter - and a pause an operator flips has to
+    silence replies as surely as it silences posts.
+
+    The schema is prepared *beside* the server rather than before it. A Postgres
+    that is briefly unreachable at boot must not stop the process coming up: an
+    agent that is alive and silent recovers on its own, while one that crash-loops
+    on a cold database needs a human - and the ops channel is exactly what carries
+    the news that the database is cold.
     """
     apply_timezone(settings.timezone)
     stopping = asyncio.Event()
@@ -357,16 +380,78 @@ async def serve(settings: Settings, clock: Clock) -> int:
 
     async with (
         open_pool(settings.rebe_database_url.get_secret_value()) as pool,
+        build_client(settings) as evolution,
         open_ops(settings, clock, pool) as ops,
     ):
+        usage = PostgresUsageStore(pool)
+        sends = PostgresSendLog(pool)
+        memory = PostgresGroupMemory(pool)
+        preparing = asyncio.create_task(_prepare(usage, sends, memory))
+
         await log_the_soft_pause(ops.pause)
+
+        leg = ReplyLeg(
+            build_brain(settings, clock, usage, ops.alerts),
+            Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower),
+            evolution,
+            memory,
+        )
+        server = EmbeddedServer(
+            uvicorn.Config(
+                build_app(leg, settings.webhook_secret.get_secret_value()),
+                host=WEBHOOK_HOST,
+                port=WEBHOOK_PORT,
+                # The agent configures its own logging from LOG_LEVEL; uvicorn's
+                # defaults would replace it and take the format with them.
+                log_config=None,
+                access_log=False,
+            )
+        )
         logger.info(
-            "no legs wired yet; the ops channel is up for instance %s",
+            "serving the webhook leg on port %d as instance %s",
+            WEBHOOK_PORT,
             settings.evolution_instance,
         )
-        await ops.serve(stopping)
+        try:
+            await asyncio.gather(_serve_webhook(server, stopping), ops.serve(stopping))
+        finally:
+            preparing.cancel()
+
     logger.info("rebe-agent stopped")
     return EXIT_OK
+
+
+async def _serve_webhook(server: EmbeddedServer, stopping: asyncio.Event) -> None:
+    """Serve until the process is asked to stop, and stop the process if it falls over.
+
+    Both directions are wired on purpose. A signal has to reach uvicorn, which is
+    otherwise deaf now that it installs no handlers of its own; and a server that
+    died on its own has to bring the ops channel down with it, because an agent
+    that cannot be reached is not an agent worth keeping a heartbeat for.
+    """
+    serving = asyncio.create_task(server.serve(), name="webhook")
+    halt = asyncio.create_task(stopping.wait(), name="stopping")
+    try:
+        await asyncio.wait([serving, halt], return_when=asyncio.FIRST_COMPLETED)
+        stopping.set()
+        server.should_exit = True
+        await serving
+    finally:
+        halt.cancel()
+
+
+async def _prepare(
+    usage: PostgresUsageStore, sends: PostgresSendLog, memory: PostgresGroupMemory
+) -> None:
+    """Make sure the `rebe` tables exist, without being able to stop the boot."""
+    try:
+        await usage.ensure_schema()
+        await sends.ensure_schema()
+        await memory.ensure_schema()
+    except psycopg.Error as exc:
+        logger.error("the rebe database is not ready; Rebe will stay silent until it is. %s", exc)
+    else:
+        logger.info("the rebe database is ready")
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:

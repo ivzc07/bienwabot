@@ -1,9 +1,10 @@
 """The one place this process talks to Evolution API.
 
-Two calls, both from section 3 of `docs/wayfinder/anti-ban-ops-spec.md`:
+Three calls, all from section 3 of `docs/wayfinder/anti-ban-ops-spec.md`:
 
 - `POST /chat/sendPresence/{instance}` - "Rebe is typing".
 - `POST /message/sendText/{instance}` - the message itself.
+- `POST /chat/markMessageAsRead/{instance}` - the blue ticks before a reply.
 
 Evolution's `sendText` can carry `presence` and `delay` and do the typing pause
 for you. This module deliberately does not use that: the playbook wants the
@@ -87,6 +88,24 @@ class EvolutionSender(Protocol):
         """
 
 
+class EvolutionReader(Protocol):
+    """What the webhook leg needs from a transport: read it before answering it.
+
+    Its own protocol rather than another method on `EvolutionSender`, because the
+    pacer has no business marking anything read and nothing that implements the
+    send path should have to grow a method it will never call.
+    """
+
+    async def mark_read(self, chat: str, message_id: str) -> None:
+        """Put the read receipt on one incoming message.
+
+        Baileys needs the message's own key, so `chat` and `message_id` together
+        are the smallest thing that identifies it. Raises `EvolutionError` if the
+        transport will not take it; the caller treats that as cosmetic, because a
+        reply that never went out is worse than a receipt that never showed.
+        """
+
+
 class EvolutionClient:
     """A thin, typed client for the one instance this process posts from."""
 
@@ -131,6 +150,18 @@ class EvolutionClient:
             f"/chat/sendPresence/{self._instance}",
             {"number": chat, "presence": presence},
             action=f"set presence {presence!r}",
+        )
+
+    async def mark_read(self, chat: str, message_id: str) -> None:
+        """Put the read receipt on one incoming message, before Rebe answers it.
+
+        `readMessages` takes a list because Baileys reads by explicit per-message
+        key; this leg answers one message at a time, so the list has one entry.
+        """
+        await self._post(
+            f"/chat/markMessageAsRead/{self._instance}",
+            {"readMessages": [{"remoteJid": chat, "fromMe": False, "id": message_id}]},
+            action="mark a message read",
         )
 
     async def send_text(self, chat: str, text: str) -> str:

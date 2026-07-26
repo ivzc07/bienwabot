@@ -1,0 +1,14 @@
+{
+  "event": "connection.update",
+  "instance": "bien-rebe",
+  "data": {
+    "instance": "bien-rebe",
+    "state": "open",
+    "statusReason": 200
+  },
+  "destination": "http://rebe-agent:8000/webhook/webhook-secret-test",
+  "date_time": "2026-07-25T12:00:00.000Z",
+  "sender": "5215551234567@s.whatsapp.net",
+  "server_url": "http://bien-evo:8080",
+  "apikey": "evo-key-test"
+}
