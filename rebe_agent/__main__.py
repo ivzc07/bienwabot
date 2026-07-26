@@ -18,12 +18,18 @@ import time
 from collections.abc import Mapping, Sequence
 from types import FrameType
 
+import httpx
+
 from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
+from rebe_agent.db import open_pool
 from rebe_agent.evolution import EvolutionError, build_client
+from rebe_agent.feeds import WebCandidates
+from rebe_agent.news import NewsLeg
 from rebe_agent.pacer import Pacer, SendRefusedError
+from rebe_agent.posted import PostgresPostedStore
 from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
 
@@ -77,9 +83,29 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "75-90 minutes apart; replies are not. Default: post."
         ),
     )
+    parser.add_argument(
+        "--post-news",
+        action="store_true",
+        help=(
+            "Run the news leg once: fetch, curate, summarise, and post the best "
+            "unposted item through the pacer. Requires --to. Nothing to post is "
+            "a clean exit, not a failure."
+        ),
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1,
+        metavar="N",
+        help="The per-run cap on how many items --post-news may post. Default: 1.",
+    )
     args = parser.parse_args(argv)
     if args.say and not args.to:
         parser.error("--say needs --to <JID> to know where to send")
+    if args.post_news and not args.to:
+        parser.error("--post-news needs --to <JID> to know where to post")
+    if args.limit < 1:
+        parser.error("--limit must be at least 1")
     return args
 
 
@@ -176,11 +202,57 @@ async def say_once(settings: Settings, clock: Clock, chat: str, text: str, kind:
     return EXIT_OK
 
 
+async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int) -> int:
+    """One turn of the news leg: the open web to the group, once, on demand.
+
+    Every store lives in the same `rebe` database, so they share one pool rather
+    than opening three. When this runs is the cadence ticket's decision; this
+    command is what that ticket will eventually be scheduling.
+
+    Posting nothing exits cleanly. On a healthy day the second run in a row has
+    nothing left to say, and an operator should not have to read that as a fault.
+    """
+    async with (
+        open_pool(settings.rebe_database_url.get_secret_value()) as pool,
+        build_client(settings) as evolution,
+        httpx.AsyncClient() as web,
+    ):
+        usage = PostgresUsageStore(pool)
+        sends = PostgresSendLog(pool)
+        posted = PostgresPostedStore(pool)
+        await usage.ensure_schema()
+        await sends.ensure_schema()
+        await posted.ensure_schema()
+
+        leg = NewsLeg(
+            build_brain(settings, clock, usage),
+            Pacer(evolution, sends, clock),
+            WebCandidates(web),
+            posted,
+            clock,
+        )
+        try:
+            sent = await leg.run(chat, limit=limit)
+        except SendRefusedError as exc:
+            logger.error("the pacer refused the post. %s", exc)
+            return EXIT_SEND_REFUSED
+        except EvolutionError as exc:
+            logger.error("the post did not get out. %s", exc)
+            return EXIT_SEND_FAILED
+
+    for post in sent:
+        logger.info("posted %s (%s)", post.item.canonical_url, post.item.source)
+    if not sent:
+        logger.info("nothing new was worth posting")
+    return EXIT_OK
+
+
 def run(settings: Settings, clock: Clock) -> int:
     """Hold the process open until the platform stops it.
 
-    The webhook leg and the news leg land in later tickets; this skeleton only
-    has to boot, stay up, and shut down cleanly on SIGTERM.
+    The news leg exists, but only on demand through `--post-news`: what puts it
+    on a timer is the cadence ticket. The webhook leg lands in a later one. So
+    this skeleton still only has to boot, stay up, and shut down on SIGTERM.
     """
     apply_timezone(settings.timezone)
     stopping = threading.Event()
@@ -222,6 +294,9 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
 
     if args.say:
         return asyncio.run(say_once(settings, clock, args.to, args.say, SendKind(args.kind)))
+
+    if args.post_news:
+        return asyncio.run(post_news_once(settings, clock, args.to, args.limit))
 
     return run(settings, clock)
 

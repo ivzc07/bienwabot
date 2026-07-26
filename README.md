@@ -4,8 +4,8 @@ Rebe, the bien.mx WhatsApp news agent.
 One Python process, one replica, two triggers (an Evolution webhook and a scheduled news leg) and one shared pacer.
 
 The design lives in `docs/wayfinder/`; `deployment-architecture-spec.md` is the map.
-This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, and the shared pacer both legs send through.
-The webhook leg and the news leg land in later tickets.
+This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, the shared pacer both legs send through, and the news leg itself.
+The news leg runs on demand; putting it on a timer is the cadence ticket, and the webhook leg lands in a later one.
 
 ## Running it
 
@@ -64,6 +64,29 @@ docker run --rm --env-file .env rebe-agent --say "hola" --to 1203...@g.us --as r
 That is the real send path, not a shortcut around it: the group sees the typing indicator, the pause is drawn rather than fixed, and the envelope gets its say.
 `--as post` is the default and obeys the overnight hold and the post-to-post gap; `--as reply` obeys neither, matching the reply policy.
 A refusal exits 4 and a transport failure exits 5.
+
+## The news leg
+
+`rebe_agent/news.py` takes one interesting AI item from the open web into the group as a short Spanish post in Rebe's voice.
+
+```sh
+docker run --rm --env-file .env rebe-agent --post-news --to 1203...@g.us
+```
+
+Candidates come from Hacker News through the keyless Algolia search API - one request returns hydrated stories already above a points floor - plus the first-party RSS feeds of the major AI orgs that `docs/wayfinder/news-pipeline-research.md` verified.
+A source that is down costs the run that source, never its post.
+
+Before anything is ranked, every candidate is checked against the posted store on three deterministic layers: the stable source ID, the canonical URL with tracking stripped and the host normalised, and a SHA-256 hash of the normalised title.
+DeepSeek has no embeddings endpoint, so there is no semantic near-duplicate layer behind those three; they are the whole gate, and a repost is the most visible bot tell there is.
+What survives is filtered for freshness, a usable title and a resolvable link, then ranked on source authority, HN points and comments, and recency decay - all of it before a single token is spent.
+
+The top item gets one DeepSeek call, which returns a framing word and one line and never a link.
+The canonical URL is appended afterwards by the code, which is what makes "it never invents or shortens a link" a property rather than a hope.
+The framing line may only restate the source item: any number the source did not supply, any link, a second emoji, or an answer too long to be a WhatsApp message is rejected and the item is dropped without posting.
+
+Then the post goes out through the shared pacer, and only after that is the item written to the posted store - so a failed send costs a re-fetch rather than losing the item for good.
+`--limit N` caps how many items one run may post; the default is one, and the pacer's post-to-post gap governs the spacing regardless.
+Running the command again immediately posts nothing, because every candidate is already known.
 
 ## Working on it
 

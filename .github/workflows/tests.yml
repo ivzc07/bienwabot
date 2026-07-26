@@ -112,6 +112,15 @@ jobs:
             -c 'from rebe_agent.pacer import Envelope; e = Envelope(); print("envelope", e.sends_per_minute, e.sends_per_hour, e.sends_per_day)' \
             | grep -q 'envelope 4 3 12'
           docker run --rm --env-file .env.ci rebe-agent:ci --help | grep -q -- '--say'
+
+      # And the news leg: its sources are a list in the image, not a config file,
+      # so an image that lost them would fetch nothing and post nothing quietly.
+      - name: The news leg is in the image, with its verified source set
+        run: |
+          docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
+            -c 'from rebe_agent.feeds import FEEDS; print("feeds", len(FEEDS), sorted(f.key for f in FEEDS)[0])' \
+            | grep -q 'feeds 8 deepmind'
+          docker run --rm --env-file .env.ci rebe-agent:ci --help | grep -q -- '--post-news'
       - name: Refuse to boot with a required variable missing
         run: |
           grep -v '^DEEPSEEK_API_KEY=' .env.ci > .env.broken
