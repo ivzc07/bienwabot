@@ -15,7 +15,8 @@ import os
 import signal
 import time
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 
 import httpx
 import psycopg
@@ -28,15 +29,17 @@ from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
 from rebe_agent.curate import DEFAULT_FILTERS
 from rebe_agent.db import Pool, open_pool
-from rebe_agent.evolution import EvolutionError, build_client
+from rebe_agent.evolution import EvolutionError, EvolutionSender, build_client
 from rebe_agent.feeds import WebCandidates
 from rebe_agent.memory import PostgresGroupMemory
 from rebe_agent.news import NewsLeg
 from rebe_agent.ops import OpsChannel, build_ops
 from rebe_agent.pacer import Pacer, SendRefusedError
 from rebe_agent.pause import Pause, PostgresPauseSwitch
+from rebe_agent.plans import PostgresPlanStore
 from rebe_agent.posted import PostgresPostedStore
 from rebe_agent.reply import ReplyLeg
+from rebe_agent.scheduler import Scheduler
 from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
 from rebe_agent.webhook import WEBHOOK_HOST, WEBHOOK_PORT, build_app
@@ -240,12 +243,75 @@ async def say_once(settings: Settings, clock: Clock, chat: str, text: str, kind:
     return EXIT_OK
 
 
+@dataclass(frozen=True, slots=True)
+class NewsStack:
+    """The news leg, the pacer it sends through, and the stores around them.
+
+    Every store lives in the same `rebe` database, so they share one pool rather
+    than opening four. The pacer is held here rather than hidden inside the leg
+    because the reply leg has to be handed *this* one: two pacers would each stay
+    politely under twelve sends a day and between them send twenty-four.
+    """
+
+    leg: NewsLeg
+    pacer: Pacer
+    usage: PostgresUsageStore
+    sends: PostgresSendLog
+    posted: PostgresPostedStore
+    plans: PostgresPlanStore
+
+    async def ensure_schema(self) -> None:
+        """Make sure every table this stack writes to exists."""
+        await self.usage.ensure_schema()
+        await self.sends.ensure_schema()
+        await self.posted.ensure_schema()
+        await self.plans.ensure_schema()
+
+
+def build_news_stack(
+    settings: Settings,
+    clock: Clock,
+    pool: Pool,
+    evolution: EvolutionSender,
+    web: httpx.AsyncClient,
+    ops: OpsChannel,
+) -> NewsStack:
+    """Wire the whole news path against one pool.
+
+    Wiring only: the tables are prepared by whoever calls this, because a one-shot
+    command wants to fail loudly on a cold database and the long-running process
+    must come up regardless and let the ops channel say so.
+
+    The ops channel is threaded through rather than reached for later. The pacer
+    holds the soft pause and the watchtower, and the brain holds the alerter, so
+    a send that is refused is silent and a send that breaks is heard about.
+    """
+    usage = PostgresUsageStore(pool)
+    sends = PostgresSendLog(pool)
+    posted = PostgresPostedStore(pool)
+    plans = PostgresPlanStore(pool, settings.zone)
+    pacer = Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower)
+
+    # One `Filters` for both halves: the fetch asks each source for exactly
+    # what the curator would have kept, rather than for its own idea of it.
+    leg = NewsLeg(
+        build_brain(settings, clock, usage, ops.alerts),
+        pacer,
+        WebCandidates(web, filters=DEFAULT_FILTERS),
+        posted,
+        clock,
+        filters=DEFAULT_FILTERS,
+    )
+    return NewsStack(
+        leg=leg, pacer=pacer, usage=usage, sends=sends, posted=posted, plans=plans
+    )
+
+
 async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int) -> int:
     """One turn of the news leg: the open web to the group, once, on demand.
 
-    Every store lives in the same `rebe` database, so they share one pool rather
-    than opening three. When this runs is the cadence ticket's decision; this
-    command is what that ticket will eventually be scheduling.
+    The same leg the scheduler fires on a drawn time, run by hand: this is how an
+    operator proves the path end to end without waiting for a window to open.
 
     Posting nothing exits cleanly. On a healthy day the second run in a row has
     nothing left to say, and an operator should not have to read that as a fault.
@@ -256,25 +322,12 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
         httpx.AsyncClient() as web,
         open_ops(settings, clock, pool) as ops,
     ):
-        usage = PostgresUsageStore(pool)
-        sends = PostgresSendLog(pool)
-        posted = PostgresPostedStore(pool)
-        await usage.ensure_schema()
-        await sends.ensure_schema()
-        await posted.ensure_schema()
-
-        # One `Filters` for both halves: the fetch asks each source for exactly
-        # what the curator would have kept, rather than for its own idea of it.
-        leg = NewsLeg(
-            build_brain(settings, clock, usage, ops.alerts),
-            Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower),
-            WebCandidates(web, filters=DEFAULT_FILTERS),
-            posted,
-            clock,
-            filters=DEFAULT_FILTERS,
-        )
+        stack = build_news_stack(settings, clock, pool, evolution, web, ops)
+        # A command run by hand should fail on a cold database rather than post
+        # nothing and exit clean, so this one waits for the tables.
+        await stack.ensure_schema()
         try:
-            sent = await leg.run(chat, limit=limit)
+            sent = await stack.leg.run(chat, limit=limit)
         except SendRefusedError as exc:
             logger.error("the pacer refused the post. %s", exc)
             return EXIT_SEND_REFUSED
@@ -381,24 +434,30 @@ async def serve(settings: Settings, clock: Clock) -> int:
     async with (
         open_pool(settings.rebe_database_url.get_secret_value()) as pool,
         build_client(settings) as evolution,
+        httpx.AsyncClient() as web,
         open_ops(settings, clock, pool) as ops,
     ):
-        usage = PostgresUsageStore(pool)
-        sends = PostgresSendLog(pool)
         memory = PostgresGroupMemory(pool)
-        preparing = asyncio.create_task(_prepare(usage, sends, memory))
+        stack = build_news_stack(settings, clock, pool, evolution, web, ops)
+        preparing = asyncio.create_task(_prepare(stack, memory))
 
         await log_the_soft_pause(ops.pause)
 
-        leg = ReplyLeg(
-            build_brain(settings, clock, usage, ops.alerts),
-            Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower),
+        # `stack.pacer`, not a second one. Both legs send through the object that
+        # holds the day's count, the turnstile and the soft pause, which is what
+        # makes the ceilings span news posts and replies rather than double.
+        reply = ReplyLeg(
+            build_brain(settings, clock, stack.usage, ops.alerts),
+            stack.pacer,
             evolution,
             memory,
         )
+        scheduler = Scheduler(
+            stack.leg, settings.rebe_group_jid, stack.plans, stack.sends, clock
+        )
         server = EmbeddedServer(
             uvicorn.Config(
-                build_app(leg, settings.webhook_secret.get_secret_value()),
+                build_app(reply, settings.webhook_secret.get_secret_value()),
                 host=WEBHOOK_HOST,
                 port=WEBHOOK_PORT,
                 # The agent configures its own logging from LOG_LEVEL; uvicorn's
@@ -408,17 +467,45 @@ async def serve(settings: Settings, clock: Clock) -> int:
             )
         )
         logger.info(
-            "serving the webhook leg on port %d as instance %s",
+            "serving the webhook leg on port %d and posting into %s as instance %s",
             WEBHOOK_PORT,
+            settings.rebe_group_jid,
             settings.evolution_instance,
         )
         try:
-            await asyncio.gather(_serve_webhook(server, stopping), ops.serve(stopping))
+            await asyncio.gather(
+                _serve_webhook(server, stopping),
+                _serve_scheduler(scheduler, stopping),
+                ops.serve(stopping),
+            )
         finally:
             preparing.cancel()
 
     logger.info("rebe-agent stopped")
     return EXIT_OK
+
+
+async def _serve_scheduler(scheduler: Scheduler, stopping: asyncio.Event) -> None:
+    """Run the dawn roll and the day it draws, until the process is asked to stop.
+
+    `Scheduler.serve` runs until cancelled, so the stop is a cancellation. A
+    scheduler that ended on its own has broken rather than finished, and taking
+    the rest of the process down with it is the wanted behaviour: the platform
+    restarts the container, and a restart is safe precisely because the day's
+    plan lives in the database rather than in this process.
+    """
+    serving = asyncio.create_task(scheduler.serve(), name="scheduler")
+    halt = asyncio.create_task(stopping.wait(), name="stopping")
+    try:
+        await asyncio.wait([serving, halt], return_when=asyncio.FIRST_COMPLETED)
+        stopping.set()
+        if serving.done():
+            await serving
+    finally:
+        serving.cancel()
+        halt.cancel()
+        with suppress(asyncio.CancelledError):
+            await serving
 
 
 async def _serve_webhook(server: EmbeddedServer, stopping: asyncio.Event) -> None:
@@ -440,13 +527,10 @@ async def _serve_webhook(server: EmbeddedServer, stopping: asyncio.Event) -> Non
         halt.cancel()
 
 
-async def _prepare(
-    usage: PostgresUsageStore, sends: PostgresSendLog, memory: PostgresGroupMemory
-) -> None:
+async def _prepare(stack: NewsStack, memory: PostgresGroupMemory) -> None:
     """Make sure the `rebe` tables exist, without being able to stop the boot."""
     try:
-        await usage.ensure_schema()
-        await sends.ensure_schema()
+        await stack.ensure_schema()
         await memory.ensure_schema()
     except psycopg.Error as exc:
         logger.error("the rebe database is not ready; Rebe will stay silent until it is. %s", exc)

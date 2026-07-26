@@ -4,8 +4,8 @@ Rebe, the bien.mx WhatsApp news agent.
 One Python process, one replica, two triggers (an Evolution webhook and a scheduled news leg) and one shared pacer.
 
 The design lives in `docs/wayfinder/`; `deployment-architecture-spec.md` is the map.
-This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, the shared pacer both legs send through, both legs themselves, and the ops channel that alerts a human and can silence her.
-The webhook leg is what the process serves when it starts; the news leg runs on demand, and putting it on a timer is the cadence ticket.
+This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, the shared pacer both legs send through, both legs themselves, the daily cadence that fires the news one, and the ops channel that alerts a human and can silence her.
+Booting the process is enough to make it run: it serves the webhook leg, draws the day's posting times at dawn and keeps them, and the ops channel runs alongside both.
 
 ## Running it
 
@@ -16,7 +16,7 @@ A missing or malformed variable stops the process at boot with a message naming 
 ```sh
 docker build -t rebe-agent .
 docker run --rm --env-file .env rebe-agent --check-config   # validate and exit
-docker run --rm --env-file .env rebe-agent                  # boot and serve the webhook leg
+docker run --rm --env-file .env rebe-agent                  # boot: serve, roll the day, post it
 ```
 
 `--check-config` validates the environment, logs the startup line, and exits - useful in CI and after changing Coolify variables.
@@ -118,13 +118,37 @@ That deliberately overrides "she always answers when addressed" - a dropped repl
 The rolling window of recent turns per group lives in `group_memory` in the `rebe` database and is handed back to the model on every event, so a follow-up lands as a follow-up and a restart does not lose the thread.
 The same table is what refuses a redelivered webhook, keeps her from answering the same person twice with nobody speaking in between, and lets a thread fade after two or three turns without a closing message.
 
+## The cadence
+
+`rebe_agent/cadence.py` decides when Rebe posts, and `rebe_agent/scheduler.py` is the loop that keeps to it.
+Booting the process with no arguments starts that loop beside the webhook server and the ops channel; there is no separate scheduler container, because the pacer's ceilings span both legs and a limiter cannot span two processes.
+
+Once a day at 06:00 a single job draws the whole day.
+A weekday gets four loose windows - 08:00-10:30, 13:00-15:00, 18:00-20:00, 21:30-23:00 - and a weekend drops the morning and shifts the rest later, because people wake later on a Saturday and AI news genuinely dries up on one.
+Inside each window one time is drawn from a Gaussian centred on the midpoint, sigma a fifth of the width, clipped to the edges: the central tendency is the point, since a flat draw is as likely to post at 08:00 as at 10:29 and a habit is what a person has.
+Nothing is ever planned between 23:00 and 08:00, which a `Cadence` cannot be configured out of - a window reaching into the night refuses to build.
+
+The whole day is drawn at once rather than window by window, because the 75-90 minute minimum gap is only enforceable with a global view: independent draws cannot see each other and would eventually put two posts ten minutes apart across a window boundary.
+A time that cannot be spaced far enough from the one before it is redrawn a few times and then given up, so the day's count drifts rather than the gap bending.
+
+Each drawn time becomes a row in the `rebe` database, not an object in a job store.
+That is what makes a restart part-way through the day pick the day back up: the times already committed to are read back rather than redrawn, a second roll of the same day cannot double-register it, and a slot that already went out is not posted twice.
+
+When a slot comes due it runs the news leg once.
+Three things can happen.
+It posts; or nothing in the curated pool cleared the quality bar and the window is skipped in silence, because Rebe never posts filler to hit a number; or the slot is dropped - it came due long after its window because the process was down, a live conversation deferred it past the edge, or the pacer refused it.
+A post that comes due within minutes of one of her own messages, post or reply, waits 10-20 jittered minutes past that message, because a news link landing seconds after she answered somebody reads as two programs running side by side.
+If that deferral would push it more than about thirty minutes past its window edge, the slot is dropped rather than posted late.
+
+Both the clock and the randomness are injected, so `tests/test_scheduler.py` runs a whole day of posting in milliseconds and `tests/test_cadence.py` checks the shape of the draw over three hundred simulated days.
+
 ## The ops channel
 
 Everything the maintainer hears, and the one thing they can say back, goes through Telegram rather than WhatsApp.
 That is the whole point: an alert about Evolution being down cannot travel through Evolution.
 
 ```sh
-docker run --rm --env-file .env rebe-agent    # boots: the webhook leg serves, the ops channel runs beside it
+docker run --rm --env-file .env rebe-agent    # boots: the webhook leg, the scheduler, and this
 ```
 
 **The heartbeat.** The process pushes to an Uptime Kuma push monitor about every sixty seconds, and a missed beat is what makes Kuma fire the Telegram alert.
@@ -155,7 +179,7 @@ mypy
 pytest
 ```
 
-The counters and the send log are asserted against a real Postgres, so those tests skip unless one is pointed at:
+The counters, the send log, the posted store and the day's plan are asserted against a real Postgres, so those tests skip unless one is pointed at:
 
 ```sh
 docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=rebe --name rebe-pg postgres:16
