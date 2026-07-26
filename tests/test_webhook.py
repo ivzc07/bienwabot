@@ -21,8 +21,10 @@ from rebe_agent.config import Settings, load_settings
 from rebe_agent.evolution import EvolutionClient
 from rebe_agent.memory import InMemoryGroupMemory
 from rebe_agent.pacer import Envelope, Pacer
+from rebe_agent.ramp import InMemoryRampStore, Ramp
 from rebe_agent.reply import ReplyLeg
 from rebe_agent.sends import InMemorySendLog
+from rebe_agent.signals import LinkWatch, Watchtower
 from rebe_agent.usage import InMemoryUsageStore
 from rebe_agent.webhook import WEBHOOK_PATH, build_app
 from tests.deepseek_stub import FakeDeepSeek
@@ -58,6 +60,9 @@ def make_client(
     fake: FakeDeepSeek,
     evolution: FakeEvolution,
     memory: InMemoryGroupMemory,
+    *,
+    link: LinkWatch | None = None,
+    ramp: Ramp | None = None,
 ) -> httpx.AsyncClient:
     """The real app over the real leg, reachable without a socket."""
     clock = ManualClock(NOON)
@@ -73,15 +78,26 @@ def make_client(
             envelope=Envelope(post_gap=(timedelta(0), timedelta(0))),
             sleeper=ManualSleeper(clock),
             rng=random.Random(20260725),
+            ramp=ramp,
         ),
         transport,
         memory,
         ChimeInBudget(InMemoryChimeInLog(), clock, rng=random.Random(20260725)),
     )
-    app = build_app(leg, SECRET)
+    app = build_app(leg, SECRET, link=link)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://rebe-agent:8000"
     )
+
+
+class RecordingLink:
+    """A link watch that keeps what it was told, so a test can read the dispatch."""
+
+    def __init__(self) -> None:
+        self.changes: list[tuple[str, int | None]] = []
+
+    async def connection_changed(self, state: str, *, reason: int | None = None) -> None:
+        self.changes.append((state, reason))
 
 
 @pytest.fixture
@@ -244,3 +260,63 @@ async def test_the_answer_says_nothing_a_caller_could_learn_from(
     stayed_quiet = await client.post(GOOD, json=payload("small_talk"))
 
     assert spoke.json() == stayed_quiet.json()
+
+
+# --- the other event: connection.update ---------------------------------------
+
+
+async def test_a_connection_update_reaches_the_link_watch(
+    settings: Settings, evolution: FakeEvolution, memory: InMemoryGroupMemory
+) -> None:
+    """The deployment spec has each instance subscribe to two events, and until
+    this ticket only one of them was wired to anything."""
+    link = RecordingLink()
+    async with make_client(
+        settings, FakeDeepSeek(verdict(), wrote()), evolution, memory, link=link
+    ) as client:
+        response = await client.post(
+            GOOD,
+            json={"event": "connection.update", "data": {"state": "close", "statusReason": 401}},
+        )
+
+    assert response.status_code == 200
+    assert link.changes == [("close", 401)]
+    assert evolution.calls == [], "nothing was said to the group about it"
+
+
+async def test_an_inbound_message_never_reaches_the_link_watch(
+    settings: Settings, evolution: FakeEvolution, memory: InMemoryGroupMemory
+) -> None:
+    link = RecordingLink()
+    async with make_client(
+        settings, FakeDeepSeek(verdict(), wrote()), evolution, memory, link=link
+    ) as client:
+        await client.post(GOOD, json=payload("by_name"))
+
+    assert link.changes == []
+    assert evolution.texts, "the reply leg still had it"
+
+
+async def test_a_disconnect_silences_the_reply_leg_and_a_reconnect_lets_it_talk(
+    settings: Settings, evolution: FakeEvolution, memory: InMemoryGroupMemory
+) -> None:
+    """End to end through the endpoint Evolution really posts to: the link drops,
+    a member addresses her, and nothing goes out until the link is back."""
+    ramp = Ramp(InMemoryRampStore(), ManualClock(NOON), InMemorySendLog())
+    async with make_client(
+        settings,
+        FakeDeepSeek(verdict(), wrote(), verdict(), wrote()),
+        evolution,
+        memory,
+        link=Watchtower(RecordingAlerter(), ramp=ramp),
+        ramp=ramp,
+    ) as client:
+        await client.post(GOOD, json={"event": "connection.update", "data": {"state": "close"}})
+        await client.post(GOOD, json=payload("by_name"))
+        silent = list(evolution.texts)
+
+        await client.post(GOOD, json={"event": "connection.update", "data": {"state": "open"}})
+        await client.post(GOOD, json=payload("mention"))
+
+    assert silent == []
+    assert len(evolution.texts) == 1

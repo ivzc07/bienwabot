@@ -1,6 +1,6 @@
 """What Evolution posts at the webhook, and which of the three tiers it falls in.
 
-Two steps, kept apart on purpose.
+Three steps, kept apart on purpose.
 
 `parse` turns a `messages.upsert` body into an `InboundMessage`, or into nothing.
 It is the only place in the codebase that knows Baileys' field names, and it
@@ -23,6 +23,11 @@ The three tiers:
 - `SILENT` - nothing to answer: her own echo, a sticker or voice note with no
   words, or a private chat, which the consent spec says she never replies in.
 
+`parse_connection` is the other event each instance subscribes to, and the only
+other one this codebase acts on: `connection.update`, which says whether the
+WhatsApp link is usable. It is read as defensively as the messages are, and what
+a state change *means* is decided in `rebe_agent.signals` rather than here.
+
 Rebe's own number is read from the envelope's `sender`, which Evolution fills
 with the JID the instance is paired to. Nothing else has to be configured for a
 mention to be recognised, and a failover to `bien-backup` - a different number -
@@ -40,7 +45,13 @@ from enum import StrEnum
 from typing import Any
 
 MESSAGE_EVENT = "messages.upsert"
-"""The only Evolution event this leg acts on."""
+"""The Evolution event the reply leg acts on."""
+
+CONNECTION_EVENT = "connection.update"
+"""The Evolution event that says whether the WhatsApp link is usable."""
+
+_REASON_FIELDS = ("statusReason", "statusCode")
+"""Where Evolution puts Baileys' disconnect reason, newest spelling first."""
 
 GROUP_SUFFIX = "@g.us"
 """What makes a JID a group rather than a person."""
@@ -113,12 +124,24 @@ class InboundMessage:
         return self.chat.endswith(GROUP_SUFFIX)
 
 
+@dataclass(frozen=True, slots=True)
+class ConnectionUpdate:
+    """Evolution's word on the WhatsApp link, and Baileys' reason if it named one."""
+
+    state: str
+    """Baileys' own word: `open`, `close`, `connecting`. Read, never trusted."""
+
+    reason: int | None = None
+    """The disconnect reason, where there was one. 401 and 403 read as bans."""
+
+
 def parse(body: Mapping[str, Any]) -> InboundMessage | None:
     """One webhook body as an `InboundMessage`, or `None` if it is not one.
 
     `None` covers every uninteresting case together - a `connection.update`, a
     body with no `data`, a receipt, a hostile POST - because the caller does the
-    same thing with all of them: nothing.
+    same thing with all of them: nothing. The connection events it turns down are
+    picked up by `parse_connection`.
     """
     if body.get("event") != MESSAGE_EVENT:
         return None
@@ -157,6 +180,36 @@ def parse(body: Mapping[str, Any]) -> InboundMessage | None:
         quoted_author=_text_of(context.get("participant")),
         rebe=_text_of(body.get("sender")),
     )
+
+
+def parse_connection(body: Mapping[str, Any]) -> ConnectionUpdate | None:
+    """One webhook body as a `ConnectionUpdate`, or `None` if it is not one.
+
+    A body with no readable state is nothing rather than a disconnect: guessing
+    that a malformed delivery meant "the link is down" would let anything that
+    can reach the port stop Rebe sending.
+    """
+    if body.get("event") != CONNECTION_EVENT:
+        return None
+
+    data = _mapping(body.get("data"))
+    state = _text_of(data.get("state"))
+    if not state:
+        return None
+    return ConnectionUpdate(state=state, reason=_reason(data))
+
+
+def _reason(data: Mapping[str, Any]) -> int | None:
+    """Baileys' disconnect reason, however Evolution's build spells it."""
+    for name in _REASON_FIELDS:
+        value = data.get(name)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value.strip())
+    return None
 
 
 def tier(message: InboundMessage, *, hers: Container[str]) -> Tier:

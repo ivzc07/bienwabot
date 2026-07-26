@@ -15,6 +15,7 @@ from rebe_agent.heartbeat import Heartbeat
 from rebe_agent.ops import Control, OpsChannel
 from rebe_agent.pacer import Envelope, Pacer, RefusalReason, SendRefusedError
 from rebe_agent.pause import InMemoryPauseSwitch, PauseState
+from rebe_agent.ramp import InMemoryRampStore, Ramp
 from rebe_agent.sends import InMemorySendLog, SendKind
 from rebe_agent.signals import Signal, Watchtower
 from rebe_agent.telegram import TelegramClient, Update
@@ -29,6 +30,12 @@ MEMBER_CHAT = "5215500000000"
 MESSAGE = "Nuevo modelo de OpenAI, ahora corre local. Se ve interesante."
 
 ROOMY = Envelope(sends_per_hour=1000, sends_per_day=1000, post_gap=(timedelta(0), timedelta(0)))
+
+
+def ramp_for(clock: ManualClock) -> Ramp:
+    """A ramp that forgets on restart. What it does is `tests/test_ramp.py`; here
+    it is only the fifth thing an assembled ops channel is made of."""
+    return Ramp(InMemoryRampStore(), clock, InMemorySendLog())
 
 
 def pacer_for(
@@ -325,6 +332,7 @@ async def test_the_channel_serves_the_heartbeat_and_the_control_together(
         pause=switch,
         heartbeat=Heartbeat(PUSH_URL, kuma.client(), interval=0.001),
         control=control_for(telegram, switch),
+        ramp=ramp_for(clock),
     )
     stopping = asyncio.Event()
 
@@ -339,7 +347,7 @@ async def test_the_channel_serves_the_heartbeat_and_the_control_together(
 
 
 async def test_a_loop_that_dies_ends_the_channel_rather_than_half_serving(
-    switch: InMemoryPauseSwitch, caplog: pytest.LogCaptureFixture
+    clock: ManualClock, switch: InMemoryPauseSwitch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A process that keeps running without a heartbeat is a process lying to Kuma."""
 
@@ -354,6 +362,7 @@ async def test_a_loop_that_dies_ends_the_channel_rather_than_half_serving(
         pause=switch,
         heartbeat=BrokenHeartbeat(PUSH_URL, FakeKuma().client()),
         control=control_for(FakeTelegram(), switch),
+        ramp=ramp_for(clock),
     )
 
     await channel.serve(asyncio.Event(), grace=0.01)

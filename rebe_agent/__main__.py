@@ -41,6 +41,7 @@ from rebe_agent.pacer import Pacer, SendRefusedError
 from rebe_agent.pause import Pause, PostgresPauseSwitch
 from rebe_agent.plans import PostgresPlanStore
 from rebe_agent.posted import PostgresPostedStore
+from rebe_agent.ramp import PostgresRampStore, Ramp
 from rebe_agent.reply import ReplyLeg
 from rebe_agent.scheduler import Scheduler
 from rebe_agent.sends import PostgresSendLog, SendKind
@@ -172,13 +173,21 @@ async def open_ops(settings: Settings, clock: Clock, pool: Pool) -> AsyncIterato
     Every command that can send opens this, and so does the run loop: the soft
     pause has to gate a `--say` and a `--post-news` exactly as it gates the loop,
     or "Rebe goes silent" would be a promise about one code path out of three.
+    The post-pairing ramp is the same shape of promise and comes out of the same
+    place, so callers take both off the channel rather than building either.
 
-    The switch's table is created on first use rather than here, so that a
-    database that is briefly unreachable delays the switch instead of stopping the
+    Neither table is created here. Both are made on first use, so a database that
+    is briefly unreachable delays the switch and the ramp instead of stopping the
     boot that was going to alert about it.
     """
     async with httpx.AsyncClient() as http:
-        yield build_ops(settings, clock, PostgresPauseSwitch(pool, clock), http)
+        yield build_ops(
+            settings,
+            clock,
+            PostgresPauseSwitch(pool, clock),
+            http,
+            Ramp(PostgresRampStore(pool), clock, PostgresSendLog(pool)),
+        )
 
 
 async def ask_once(settings: Settings, clock: Clock, prompt: str) -> int:
@@ -232,7 +241,7 @@ async def say_once(settings: Settings, clock: Clock, chat: str, text: str, kind:
     ):
         log = PostgresSendLog(pool)
         await log.ensure_schema()
-        pacer = Pacer(client, log, clock, pause=ops.pause, watch=ops.watchtower)
+        pacer = Pacer(client, log, clock, pause=ops.pause, watch=ops.watchtower, ramp=ops.ramp)
         try:
             # The pacer logs the send it made; there is one event here, not two.
             await pacer.send(kind, chat, text)
@@ -288,15 +297,16 @@ def build_news_stack(
     must come up regardless and let the ops channel say so.
 
     The ops channel is threaded through rather than reached for later. The pacer
-    holds the soft pause and the watchtower, and the brain holds the alerter, so
-    a send that is refused is silent and a send that breaks is heard about.
+    holds the soft pause, the ramp and the watchtower, and the brain holds the
+    alerter, so a send that is refused is silent and a send that breaks is heard
+    about.
     """
     usage = PostgresUsageStore(pool)
     sends = PostgresSendLog(pool)
     posted = PostgresPostedStore(pool)
     plans = PostgresPlanStore(pool, settings.zone)
     overnight = PostgresOvernightQueue(pool)
-    pacer = Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower)
+    pacer = Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower, ramp=ops.ramp)
 
     # One `Filters` for both halves: the fetch asks each source for exactly
     # what the curator would have kept, rather than for its own idea of it.
@@ -408,6 +418,36 @@ async def log_the_soft_pause(pause: Pause) -> None:
         logger.info("the soft pause is off; sending is normal")
 
 
+async def log_the_ramp(ramp: Ramp) -> None:
+    """Log where the post-pairing ramp stands at boot, and start it if it is new.
+
+    Bounded and forgiving in exactly the way `log_the_soft_pause` is, and for the
+    same reason: an unreachable `rebe` database must not take down the heartbeat
+    and the control channel that are how anybody hears about it.
+
+    This is also the moment a fresh deployment's ramp is stamped. The agent has
+    no pairing event to hang it on, so first boot is the closest honest thing
+    there is - and having it happen here means the log says when.
+    """
+    try:
+        state = await asyncio.wait_for(ramp.state(), SWITCH_READY_SECONDS)
+        cap = await asyncio.wait_for(ramp.post_cap(), SWITCH_READY_SECONDS)
+    except (TimeoutError, psycopg.Error, PoolTimeout) as exc:
+        logger.error(
+            "could not read the post-pairing ramp (%s): %s. Rebe will be clamped "
+            "or not according to whatever the next read finds.",
+            type(exc).__name__,
+            str(exc) or "no detail",
+        )
+        return
+    logger.info(
+        "the ramp started %s (%s); today allows %s",
+        state.started_at.isoformat(timespec="seconds"),
+        state.reason,
+        f"{cap} news posts" if cap is not None else "the cadence spec's steady state",
+    )
+
+
 class EmbeddedServer(uvicorn.Server):
     """Uvicorn with its signal handling left to the caller.
 
@@ -455,6 +495,7 @@ async def serve(settings: Settings, clock: Clock) -> int:
         preparing = asyncio.create_task(_prepare(stack, memory, chime_ins))
 
         await log_the_soft_pause(ops.pause)
+        await log_the_ramp(ops.ramp)
 
         # `stack.pacer`, not a second one. Both legs send through the object that
         # holds the day's count, the turnstile and the soft pause, which is what
@@ -490,7 +531,14 @@ async def serve(settings: Settings, clock: Clock) -> int:
         )
         server = EmbeddedServer(
             uvicorn.Config(
-                build_app(reply, settings.webhook_secret.get_secret_value()),
+                build_app(
+                    reply,
+                    settings.webhook_secret.get_secret_value(),
+                    # The other event each instance subscribes to. Without this
+                    # the link going down would be an alert and nothing more,
+                    # and a reconnect would resume at the previous rate.
+                    link=ops.watchtower,
+                ),
                 host=WEBHOOK_HOST,
                 port=WEBHOOK_PORT,
                 # The agent configures its own logging from LOG_LEVEL; uvicorn's

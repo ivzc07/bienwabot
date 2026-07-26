@@ -47,6 +47,13 @@ message leaves through. The out-of-band soft pause is read before every send, so
 one switch silences posts and replies together; and a send that fails in
 transport is reported to a `SendWatch`, because a 463 or a temporary ban is only
 ever seen right here.
+
+The post-pairing ramp of `rebe_agent.ramp` hangs off the same envelope, for the
+third time for the same reason. Its clamp on the day is read where the daily
+ceiling is read, so it bounds the drawn slots and the breaking-news overrides
+alike rather than only the path somebody remembered to check; and its halt - a
+link that is down, a back-off after WhatsApp pushed back - is read where the
+soft pause is, because "stop sending" has to mean every leg and not one of them.
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from enum import StrEnum
@@ -62,6 +70,7 @@ from typing import TypeVar
 from rebe_agent.clock import Clock, RealSleeper, Sleeper, local_day
 from rebe_agent.evolution import COMPOSING, PAUSED, EvolutionError, EvolutionSender
 from rebe_agent.pause import NeverPaused, Pause
+from rebe_agent.ramp import HaltKind, RampGate, SteadyState
 from rebe_agent.sends import SendKind, SendLog, SendRecord, fingerprint, stable_fraction
 from rebe_agent.signals import SendWatch, Watchtower
 
@@ -86,6 +95,15 @@ class RefusalReason(StrEnum):
     SOFT_PAUSE = "soft_pause"
     """The out-of-band soft pause is on. Nothing goes out until a human flips it."""
 
+    LINK_DOWN = "link_down"
+    """Evolution reports the WhatsApp link as down, so nothing can get out."""
+
+    BACKING_OFF = "backing_off"
+    """WhatsApp pushed back on a recent send, so the door is held deliberately shut."""
+
+    RAMP_CLAMP = "ramp_clamp"
+    """The day is full for the post-pairing ramp, which is tighter than the ceiling."""
+
     DUPLICATE = "duplicate"
     """The previous message had identical wording."""
 
@@ -103,6 +121,17 @@ class RefusalReason(StrEnum):
 
     DAILY_CEILING = "daily_ceiling"
     """The local day is full, counting posts and replies together."""
+
+
+HALTS: Mapping[HaltKind, RefusalReason] = {
+    HaltKind.LINK_DOWN: RefusalReason.LINK_DOWN,
+    HaltKind.BACKING_OFF: RefusalReason.BACKING_OFF,
+}
+"""How the ramp's two ways of stopping sending read as a refusal.
+
+Spelled out rather than derived from the names, so renaming either enum is a
+type error here instead of a refusal reason that quietly stops matching.
+"""
 
 
 class SendRefusedError(RuntimeError):
@@ -208,6 +237,7 @@ class Pacer:
         rng: random.Random | None = None,
         pause: Pause | None = None,
         watch: SendWatch | None = None,
+        ramp: RampGate | None = None,
     ) -> None:
         self._client = client
         self._log = log
@@ -218,6 +248,7 @@ class Pacer:
         self._rng = rng or random.Random()
         self._pause = pause or NeverPaused()
         self._watch = watch or Watchtower()
+        self._ramp = ramp or SteadyState()
         # Held for the whole send, typing pause included. Two things fall out of
         # that: the ceilings cannot be read by two callers at once and both act
         # on the same number, and Rebe is never typing two messages at the same
@@ -239,6 +270,11 @@ class Pacer:
             # and the group never sees a typing indicator for a message that is
             # not coming.
             await self._check_the_pause()
+            # And the ramp's halt in the same breath, for the same reasons: a
+            # link that is down or a WhatsApp that is throttling means nothing
+            # goes out, and finding that out after a minute-long hold would put
+            # a typing indicator in front of a message that is not coming.
+            await self._check_the_ramp()
 
             # The minute floor next, so every rule below is judged on the clock
             # as it will be when the message actually goes out. A wait of up to
@@ -282,6 +318,24 @@ class Pacer:
                 f"nothing goes out until an operator flips it back",
             )
 
+    async def _check_the_ramp(self) -> None:
+        """Refuse everything while the ramp says sending is stopped.
+
+        Beside the soft pause rather than folded into it, and read in the same
+        breath. One is an operator asking for quiet and comes back when they say
+        so; the other is WhatsApp or Evolution saying no and comes back on its
+        own. A refusal that could not tell those apart would send a maintainer
+        looking for a switch nobody flipped.
+        """
+        halt = await self._ramp.halt()
+        if halt is None:
+            return
+        raise SendRefusedError(
+            HALTS[halt.kind],
+            halt.detail,
+            retry_after=max(halt.until - self._clock.now(), timedelta(0)),
+        )
+
     async def _check_ceilings(self, kind: SendKind, text: str, now: datetime) -> None:
         """Every rule that can answer "no". Raises, or returns having said nothing."""
         previous = await self._log.latest()
@@ -322,7 +376,14 @@ class Pacer:
         A directly-addressed reply is exempt from both. Section 2 of the cadence
         spec is explicit that replies may still fire overnight; what keeps them
         rare at that hour is the hush, which both legs obey.
+
+        The post-pairing ramp's clamp is read here too, and first: it is a
+        statement about the whole day, so it outranks the hour and the spacing,
+        and it is about *news posts* specifically - the playbook clamps those and
+        says replies carry on as normal.
         """
+        await self._check_the_clamp(now)
+
         hold = self._envelope.overnight_hold
         if hold.contains(now.time()):
             raise SendRefusedError(
@@ -343,6 +404,26 @@ class Pacer:
                 f"the last post was {_minutes(elapsed)} ago and this one wants "
                 f"{_minutes(required)} of space",
                 retry_after=required - elapsed,
+            )
+
+    async def _check_the_clamp(self, now: datetime) -> None:
+        """The post-pairing ramp's cap on the day, if the ramp is still running.
+
+        Read against the send log rather than against anything the caller
+        carries, so a restart part-way through a clamped day picks the count back
+        up instead of handing itself three fresh posts.
+        """
+        cap = await self._ramp.post_cap()
+        if cap is None:
+            return
+        day = local_day(now, self._clock.zone)
+        posts = await self._log.count_on(day, kind=SendKind.POST)
+        if posts >= cap:
+            raise SendRefusedError(
+                RefusalReason.RAMP_CLAMP,
+                f"{posts} news posts on {day.isoformat()} is what the post-pairing "
+                f"ramp allows this week",
+                retry_after=_until(now, time(0, 0)),
             )
 
     def _check_the_hush(self, previous: SendRecord, now: datetime) -> None:

@@ -36,6 +36,7 @@ from rebe_agent.clock import Clock
 from rebe_agent.config import Settings
 from rebe_agent.heartbeat import Heartbeat, build_heartbeat
 from rebe_agent.pause import PauseState, PauseSwitch
+from rebe_agent.ramp import Ramp
 from rebe_agent.signals import Watchtower
 from rebe_agent.telegram import POLL_SECONDS, TelegramClient, TelegramError, Update, build_telegram
 
@@ -187,13 +188,20 @@ class Control:
 
 @dataclass(frozen=True, slots=True)
 class OpsChannel:
-    """Everything out of band, assembled: alerts, the heartbeat, and the switch."""
+    """Everything out of band, assembled: alerts, the heartbeat, and the switches."""
 
     alerts: Alerter
     watchtower: Watchtower
     pause: PauseSwitch
     heartbeat: Heartbeat
     control: Control
+    ramp: Ramp
+    """The post-pairing ramp the watchtower moves, so the pacer can be handed it.
+
+    Here for the same reason `pause` is: what a disconnect or a 463 does to
+    sending is decided out of band, and the object that decides it and the object
+    that reads it have to be the same one.
+    """
 
     async def serve(self, stopping: asyncio.Event, *, grace: float = SHUTDOWN_SECONDS) -> None:
         """Run the heartbeat and the control channel until `stopping` is set.
@@ -232,19 +240,21 @@ def build_ops(
     clock: Clock,
     pause: PauseSwitch,
     http_client: httpx.AsyncClient,
+    ramp: Ramp,
 ) -> OpsChannel:
     """Wire the ops channel from configuration.
 
-    The pause switch comes in from outside rather than being built here: it is a
-    table in the `rebe` database, and which pool that lives in is the caller's
-    decision - every command shares one pool.
+    The pause switch and the ramp come in from outside rather than being built
+    here: both are tables in the `rebe` database, and which pool they live in is
+    the caller's decision - every command shares one pool.
     """
     telegram = build_telegram(settings, http_client=http_client)
     alerts = ThrottledAlerter(TelegramAlerter(telegram), clock)
     return OpsChannel(
         alerts=alerts,
-        watchtower=Watchtower(alerts, pause=pause),
+        watchtower=Watchtower(alerts, pause=pause, ramp=ramp),
         pause=pause,
         heartbeat=build_heartbeat(settings, http_client),
         control=Control(telegram, pause, settings.telegram_chat_id),
+        ramp=ramp,
     )

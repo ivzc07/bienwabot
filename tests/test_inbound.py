@@ -1,9 +1,10 @@
 """The reply gate, read off real webhook bodies.
 
-Two things are under test and they are deliberately separate: `parse`, which
-turns Evolution's body into something typed or into nothing at all, and `tier`,
-which is the three-tier decision from the reply policy. Everything here is
-mechanical - no model is asked whether a name-tag is a name-tag.
+Three things are under test and they are deliberately separate: `parse`, which
+turns Evolution's body into something typed or into nothing at all; `tier`, which
+is the three-tier decision from the reply policy; and `parse_connection`, which
+reads the other event each instance subscribes to. Everything here is mechanical
+- no model is asked whether a name-tag is a name-tag.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from rebe_agent.inbound import Tier, parse, tier
+from rebe_agent.inbound import Tier, parse, parse_connection, tier
 from tests.support import GROUP
 from tests.webhooks import ANA, AT_EPOCH, BETO, REBE, edited, payload
 
@@ -160,3 +161,61 @@ def test_the_recorded_timestamp_is_the_one_the_shape_rules_read() -> None:
 
     assert later is not None
     assert later.at == datetime(2026, 7, 25, 18, 10, tzinfo=UTC)
+
+
+# --- the other event: what Evolution says about the link ----------------------
+
+
+def test_a_connection_update_is_read_off_the_recorded_payload() -> None:
+    update = parse_connection(payload("connection_update"))
+
+    assert update is not None
+    assert update.state == "open"
+    assert update.reason == 200
+
+
+def test_a_disconnect_carries_the_reason_baileys_named() -> None:
+    """401 and 403 are what tell a dropped socket from a banned number, so the
+    reason has to survive the parse."""
+    body = {"event": "connection.update", "data": {"state": "close", "statusReason": 403}}
+
+    update = parse_connection(body)
+
+    assert update is not None
+    assert (update.state, update.reason) == ("close", 403)
+
+
+def test_a_reason_that_arrived_as_a_string_is_still_a_number() -> None:
+    body = {"event": "connection.update", "data": {"state": "close", "statusCode": "401"}}
+
+    update = parse_connection(body)
+
+    assert update is not None and update.reason == 401
+
+
+def test_a_disconnect_with_no_reason_is_still_a_disconnect() -> None:
+    update = parse_connection({"event": "connection.update", "data": {"state": "close"}})
+
+    assert update is not None and update.reason is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"event": "connection.update", "data": {"state": ""}},
+        {"event": "connection.update", "data": {}},
+        {"event": "connection.update"},
+        {"event": "connection.update", "data": {"state": {"nested": "nonsense"}}},
+        {"nothing": "useful"},
+    ],
+)
+def test_a_body_with_no_readable_state_is_not_a_connection_update(
+    body: dict[str, object],
+) -> None:
+    """Guessing that a malformed delivery meant "the link is down" would let
+    anything that can reach the port stop Rebe sending."""
+    assert parse_connection(body) is None
+
+
+def test_an_inbound_message_is_not_a_connection_update() -> None:
+    assert parse_connection(payload("by_name")) is None
