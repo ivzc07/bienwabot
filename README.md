@@ -104,7 +104,7 @@ docker run --rm --env-file .env rebe-agent    # boots, then the ops channel is t
 The beat is emitted from inside the running loop rather than by a health endpoint, so it proves the loop is turning and not merely that the process exists - a wedged loop and a crashed process look the same to Kuma, which is the point.
 It also needs no exposed port, and the agent has no public URL.
 
-**The alerts.** `rebe_agent/alerts.py` names the closed set of things worth waking somebody for: a 463 reach-out time-lock or other rate error on send, any other send Evolution would not take, an Evolution connection that has dropped, the two shapes a ban arrives in, and a DeepSeek call that came back with nothing.
+**The alerts.** `rebe_agent/signals.py` names the closed set of things worth waking somebody for, and `rebe_agent/alerts.py` is the way out: a 463 reach-out time-lock or other rate error on send, any other send Evolution would not take, an Evolution connection that has dropped, the two shapes a ban arrives in, and a DeepSeek call that came back with nothing.
 Each alert carries what happened, whether Rebe is still sending, and what to do about it - the permanent-ban one says to point `EVOLUTION_INSTANCE` at `bien-backup`, the temporary one says explicitly not to.
 Repeats of one signal are collapsed into one message per half hour and counted into the next one, because an alert storm is the same as no alerts.
 

@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from rebe_agent.heartbeat import Heartbeat
+from rebe_agent.heartbeat import HEARTBEAT_SECONDS, Heartbeat
 from tests.kuma_stub import PUSH_TOKEN, PUSH_URL, FakeKuma
 
 FAST = 0.001
@@ -95,6 +95,6 @@ async def test_a_hung_loop_stops_the_beat_even_though_the_process_is_up() -> Non
     await running
 
 
-async def test_the_shipped_interval_is_about_a_minute() -> None:
+def test_the_shipped_interval_is_about_a_minute() -> None:
     """Kuma's monitor is configured against this number; drifting is a false alarm."""
-    assert 30.0 <= Heartbeat(PUSH_URL, FakeKuma().client()).interval <= 60.0
+    assert 30.0 <= HEARTBEAT_SECONDS <= 60.0

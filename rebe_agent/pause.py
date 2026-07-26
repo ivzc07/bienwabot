@@ -128,6 +128,7 @@ class PostgresPauseSwitch:
     def __init__(self, pool: Pool, clock: Clock) -> None:
         self._pool = pool
         self._clock = clock
+        self._table_is_there = False
 
     @classmethod
     @asynccontextmanager
@@ -141,8 +142,22 @@ class PostgresPauseSwitch:
     async def ensure_schema(self) -> None:
         async with self._pool.connection() as conn:
             await conn.execute(SCHEMA)
+        self._table_is_there = True
+
+    async def _ready(self) -> None:
+        """Create the table on first use, and try again next time if that failed.
+
+        Boot creates it too, but boot is allowed to fail: the `rebe` database can
+        be a few seconds behind the container, and the ops channel comes up anyway
+        so that somebody can hear about it. Without this, a switch that missed its
+        one chance would stay broken until the next redeploy - taking the only
+        control path with it.
+        """
+        if not self._table_is_there:
+            await self.ensure_schema()
 
     async def state(self) -> PauseState:
+        await self._ready()
         async with self._pool.connection() as conn:
             cursor = await conn.execute(
                 f"SELECT {COLUMNS} FROM soft_pause WHERE id = %s", (ONLY_ROW,)
@@ -155,6 +170,7 @@ class PostgresPauseSwitch:
 
     async def set_paused(self, paused: bool, *, reason: str = "") -> PauseState:
         """Write the switch down, keeping `since` if it already pointed this way."""
+        await self._ready()
         now = self._clock.now()
         stored = reason if paused else ""
         async with self._pool.connection() as conn:
@@ -175,11 +191,8 @@ class PostgresPauseSwitch:
                 (ONLY_ROW, paused, now, stored),
             )
             row = await cursor.fetchone()
-        state = (
-            PauseState(paused=bool(row[0]), since=row[1], reason=str(row[2]))
-            if row
-            else PauseState(paused=paused, since=now, reason=stored)
-        )
+        assert row is not None, "an upsert with RETURNING always answers with its row"
+        state = PauseState(paused=bool(row[0]), since=row[1], reason=str(row[2]))
         logger.info(
             "the soft pause is now %s%s",
             "ON" if state.paused else "off",

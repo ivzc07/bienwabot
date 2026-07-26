@@ -6,16 +6,11 @@ from datetime import timedelta
 
 import pytest
 
-from rebe_agent.alerts import (
-    ALERT_WINDOW,
-    Signal,
-    TelegramAlerter,
-    ThrottledAlerter,
-    Watchtower,
-)
+from rebe_agent.alerts import ALERT_WINDOW, TelegramAlerter, ThrottledAlerter
 from rebe_agent.clock import ManualClock
 from rebe_agent.evolution import EvolutionError, EvolutionRateLimitedError
 from rebe_agent.pause import InMemoryPauseSwitch
+from rebe_agent.signals import Signal, Watchtower
 from rebe_agent.telegram import TelegramClient
 from tests.support import NOON, RecordingAlerter
 from tests.telegram_stub import CHAT_ID, TOKEN, FakeTelegram
@@ -189,6 +184,21 @@ async def test_a_deepseek_error_reaches_the_maintainer(recorded: RecordingAlerte
     (alert,) = recorded.messages
     assert Signal.BRAIN_ERROR in alert
     assert "news_summary" in alert
+
+
+async def test_an_alerter_that_throws_does_not_replace_the_failure_it_was_told_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Both hooks are called from inside an `except` block, so an exception raised
+    here would hand the caller an error about the telling rather than the thing."""
+
+    class BrokenAlerter:
+        async def alert(self, message: str, *, key: str | None = None) -> None:
+            raise RuntimeError("telegram is not even installed")
+
+    await Watchtower(BrokenAlerter()).send_failed(EvolutionError("send a message", status=500))
+
+    assert Signal.SEND_FAILED in caplog.text
 
 
 async def test_a_ban_still_alerts_when_the_switch_cannot_be_flipped(

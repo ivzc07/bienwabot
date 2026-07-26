@@ -9,12 +9,17 @@ no exposed health port, which matters because section 2.2 gives it no public URL
 at all.
 
 **From inside the loop.** A `GET /health` handler answers for as long as the
-process is alive, which means a bot whose loop has wedged - a deadlock, a
-synchronous call that never returns - reports itself healthy while the group hears
-nothing. This beat is a coroutine on the same event loop as both legs, so anything
-that stops the loop turning also stops the beat, and Kuma turns that into an alert
-within a minute. That is the difference between detecting a crash and detecting a
-hang.
+process is alive, so a bot whose loop has wedged reports itself healthy while the
+group hears nothing. This beat is a coroutine on the same event loop as both legs,
+so anything that stops that loop *turning* - a synchronous call that never
+returns, a busy loop, a blocking driver - stops the beat too, and Kuma turns the
+silence into an alert within a minute. That is the difference between detecting a
+crash and detecting a wedge.
+
+What it does not detect is one leg hung on an `await` while the loop still runs:
+the process really is alive and scheduling, and only the leg knows that its own
+tick is overdue. That is a per-leg watchdog, and it belongs with the legs that
+have ticks - the scheduler and the webhook - rather than here.
 
 A failed push is a warning and nothing more. Kuma being unreachable is not an
 outage, and a heartbeat that raised would take the process down - turning the
@@ -65,8 +70,12 @@ class Heartbeat:
         self._push_url = push_url
         self._http = http_client
         self._timeout = timeout
-        self.interval = interval
-        """Seconds between beats. Read by tests, and by nobody in production."""
+        self._interval = interval
+
+    @property
+    def interval(self) -> float:
+        """Seconds between beats. The Kuma monitor is configured against this."""
+        return self._interval
 
     async def beat(self, message: str = ALIVE) -> None:
         """Push once. Never raises, whatever Kuma or the network does.
@@ -103,4 +112,4 @@ class Heartbeat:
 
 def build_heartbeat(settings: Settings, http_client: httpx.AsyncClient) -> Heartbeat:
     """The heartbeat for whichever monitor `KUMA_PUSH_URL` names."""
-    return Heartbeat(settings.kuma_push_url, http_client)
+    return Heartbeat(settings.kuma_push_url.get_secret_value(), http_client)

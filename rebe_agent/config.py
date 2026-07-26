@@ -75,11 +75,11 @@ class Settings(BaseModel):
     rebe_database_url: SecretStr = Field(alias="REBE_DATABASE_URL")
     telegram_bot_token: SecretStr = Field(alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(alias="TELEGRAM_CHAT_ID")
-    kuma_push_url: str = Field(alias="KUMA_PUSH_URL")
+    kuma_push_url: SecretStr = Field(alias="KUMA_PUSH_URL")
     timezone: str = Field(default=DEFAULT_TIMEZONE, alias="TZ")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
-    @field_validator("evolution_api_url", "kuma_push_url", "deepseek_base_url")
+    @field_validator("evolution_api_url", "deepseek_base_url")
     @classmethod
     def _check_url(cls, value: str) -> str:
         return _absolute_url(value)
@@ -91,6 +91,14 @@ class Settings(BaseModel):
             value.get_secret_value(),
             allowed_schemes=("postgresql", "postgres", "postgresql+psycopg"),
         )
+        return value
+
+    @field_validator("kuma_push_url")
+    @classmethod
+    def _check_push_url(cls, value: SecretStr) -> SecretStr:
+        """A secret like the rest of them: the push token is *in* the URL, so
+        anybody holding it can keep the monitor green while Rebe is dead."""
+        _absolute_url(value.get_secret_value())
         return value
 
     @field_validator("evolution_instance", "telegram_chat_id")

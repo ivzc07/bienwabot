@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
-from rebe_agent.alerts import Signal
 from rebe_agent.brain import (
     CALL_SHAPES,
     DEEPSEEK_MODEL,
@@ -17,6 +16,7 @@ from rebe_agent.brain import (
 from rebe_agent.clock import ManualClock
 from rebe_agent.config import Settings, load_settings
 from rebe_agent.guard import STOP_THRESHOLD
+from rebe_agent.signals import Signal
 from rebe_agent.usage import CallType, DayTotals, InMemoryUsageStore
 from tests.deepseek_stub import FakeDeepSeek, tool_call_response
 from tests.support import NOON, TODAY, RecordingAlerter

@@ -91,10 +91,11 @@ jobs:
           docker logs "$id"
           docker logs "$id" 2>&1 | grep -q 'the ops channel is up'
           docker logs "$id" 2>&1 | grep -q 'ops control channel is listening'
-          # The Telegram bot token lives in the URL path, so any line carrying it
-          # is a leaked credential - httpx logs request URLs at INFO by default.
-          if docker logs "$id" 2>&1 | grep -q 'bot ci-placeholder\|botci-placeholder'; then
-            echo "the bot token reached the log"
+          # Both the Telegram bot token and the Kuma push token live in a URL
+          # *path*, so any logged line carrying one is a leaked credential - and
+          # httpx logs the URL of every request it makes at INFO by default.
+          if docker logs "$id" 2>&1 | grep -Eq 'api\.telegram\.org/bot.|/api/push/'; then
+            echo "a token-bearing URL reached the log"
             exit 1
           fi
           test "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = "0"

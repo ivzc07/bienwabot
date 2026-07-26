@@ -31,11 +31,12 @@ from dataclasses import dataclass
 
 import httpx
 
-from rebe_agent.alerts import Alerter, TelegramAlerter, ThrottledAlerter, Watchtower
+from rebe_agent.alerts import Alerter, TelegramAlerter, ThrottledAlerter
 from rebe_agent.clock import Clock
 from rebe_agent.config import Settings
 from rebe_agent.heartbeat import Heartbeat, build_heartbeat
 from rebe_agent.pause import PauseState, PauseSwitch
+from rebe_agent.signals import Watchtower
 from rebe_agent.telegram import POLL_SECONDS, TelegramClient, TelegramError, Update, build_telegram
 
 logger = logging.getLogger("rebe_agent.ops")
@@ -85,10 +86,16 @@ def parse(text: str) -> Command | None:
 class Control:
     """The way in: Telegram messages from the ops chat, and nothing else.
 
-    One update is acted on once. Telegram redelivers an update until an offset
-    past it is acknowledged, so the offset is advanced after handling rather than
-    before - a `/pausa` that arrived while the process was restarting still lands,
-    and it lands once.
+    Telegram redelivers an update until an offset past it is acknowledged, and the
+    offset is advanced only *after* the command has been carried out. So a
+    `/pausa` that arrived while the process was restarting still lands, and one
+    whose write failed - the `rebe` database being briefly unreachable is the
+    realistic way - is offered again on the next poll instead of being dropped by
+    the one control path that exists to stop a banned number sending.
+
+    That makes delivery at-least-once, which is safe because both verbs are
+    idempotent: pausing an already-paused Rebe keeps the moment she went quiet.
+    The operator's confirmation is what says it landed - no reply means it did not.
     """
 
     def __init__(
@@ -102,7 +109,7 @@ class Control:
     ) -> None:
         self._telegram = telegram
         self._pause = pause
-        self._chat_id = str(chat_id)
+        self._chat_id = chat_id
         self._poll_seconds = poll_seconds
         self._retry_seconds = retry_seconds
         self._offset = 0
@@ -116,8 +123,8 @@ class Control:
                 for update in await self._telegram.poll(
                     offset=self._offset, timeout=self._poll_seconds
                 ):
-                    self._offset = max(self._offset, update.update_id + 1)
                     await self.handle(update)
+                    self._offset = max(self._offset, update.update_id + 1)
             except TelegramError as exc:
                 logger.warning("could not read the ops channel: %s", exc)
                 waiting = self._retry_seconds

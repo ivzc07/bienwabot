@@ -8,14 +8,15 @@ from datetime import timedelta
 
 import pytest
 
-from rebe_agent.alerts import Signal, TelegramAlerter, ThrottledAlerter, Watchtower
+from rebe_agent.alerts import TelegramAlerter, ThrottledAlerter
 from rebe_agent.clock import ManualClock, ManualSleeper
 from rebe_agent.evolution import EvolutionClient, EvolutionError
 from rebe_agent.heartbeat import Heartbeat
 from rebe_agent.ops import Control, OpsChannel
 from rebe_agent.pacer import Envelope, Pacer, RefusalReason, SendRefusedError
-from rebe_agent.pause import InMemoryPauseSwitch
+from rebe_agent.pause import InMemoryPauseSwitch, PauseState
 from rebe_agent.sends import InMemorySendLog, SendKind
+from rebe_agent.signals import Signal, Watchtower
 from rebe_agent.telegram import TelegramClient, Update
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.kuma_stub import PUSH_URL, FakeKuma
@@ -156,6 +157,38 @@ async def test_something_that_is_not_a_command_flips_nothing(
     assert (await switch.state()).paused is False
 
 
+async def test_a_command_that_could_not_be_carried_out_is_offered_again(
+    telegram: FakeTelegram,
+) -> None:
+    """The offset moves only after the switch actually moved. Acknowledging first
+    would drop a `/pausa` whose write failed - on the one control path that exists
+    to stop a banned number sending."""
+
+    class UnwritableSwitch(InMemoryPauseSwitch):
+        broken = True
+
+        async def set_paused(self, paused: bool, *, reason: str = "") -> PauseState:
+            if self.broken:
+                raise RuntimeError("the rebe database is unreachable")
+            return await super().set_paused(paused, reason=reason)
+
+    switch = UnwritableSwitch(ManualClock(NOON))
+    control = control_for(telegram, switch)
+
+    with pytest.raises(RuntimeError):
+        await control.handle(ops_message("/pausa", update_id=7))
+    telegram.updates = [[message(7, "/pausa")]]
+    switch.broken = False
+    stopping = asyncio.Event()
+    running = asyncio.create_task(control.run(stopping))
+    while not (await switch.state()).paused:
+        await asyncio.sleep(0)
+    stopping.set()
+    await running
+
+    assert telegram.polls[0]["offset"] == 0, "the failed command was never acknowledged"
+
+
 async def test_a_command_is_acted_on_once_however_often_telegram_offers_it(
     switch: InMemoryPauseSwitch,
 ) -> None:
@@ -195,13 +228,18 @@ async def test_a_telegram_that_is_down_does_not_take_the_control_channel_with_it
 # --- What a failed send sounds like ------------------------------------------
 
 
+@pytest.mark.parametrize("status", [463, 429])
 async def test_a_rate_limited_send_reaches_telegram_and_names_the_signal(
-    clock: ManualClock, telegram: FakeTelegram
+    status: int, clock: ManualClock, telegram: FakeTelegram
 ) -> None:
     """The whole path, through the real seams: WhatsApp pushes back on a send, and
-    the maintainer's phone buzzes over a channel that does not need WhatsApp."""
+    the maintainer's phone buzzes over a channel that does not need WhatsApp.
+
+    Both statuses, because the playbook names the 463 reach-out time-lock and the
+    spec answers "463 / 4xx rate error" with one response.
+    """
     evolution = FakeEvolution()
-    evolution.text_status = 463
+    evolution.text_status = status
     alerts = ThrottledAlerter(
         TelegramAlerter(TelegramClient(TOKEN, CHAT_ID, http_client=telegram.client())), clock
     )
@@ -253,24 +291,16 @@ async def test_a_refusal_is_not_worth_waking_anybody_for(
 # --- What a pause does not stop ----------------------------------------------
 
 
-async def test_the_heartbeat_and_the_scheduler_keep_going_while_she_is_paused(
+async def test_the_heartbeat_keeps_flowing_while_she_is_paused(
     clock: ManualClock, switch: InMemoryPauseSwitch
 ) -> None:
     """A pause must look different from a crash, or the operator learns to ignore
     the monitor. Rebe stays in the group, the process stays up, the beat keeps
-    flowing - only the sending stops."""
+    flowing - only the sending stops. The scheduler is the same story and lands
+    with the cadence ticket: nothing here reads the switch except the pacer."""
     kuma = FakeKuma()
     evolution = FakeEvolution()
-    log = InMemorySendLog()
-    pacer = Pacer(
-        EvolutionClient(BASE_URL, API_KEY, INSTANCE, http_client=evolution.client()),
-        log,
-        clock,
-        envelope=Envelope(sends_per_hour=1000, post_gap=(timedelta(0), timedelta(0))),
-        sleeper=ManualSleeper(clock),
-        rng=random.Random(20260725),
-        pause=switch,
-    )
+    pacer = pacer_for(evolution, InMemorySendLog(), clock, pause=switch)
     await switch.set_paused(True, reason="cool it")
 
     await Heartbeat(PUSH_URL, kuma.client()).beat()
@@ -309,7 +339,7 @@ async def test_the_channel_serves_the_heartbeat_and_the_control_together(
 
 
 async def test_a_loop_that_dies_ends_the_channel_rather_than_half_serving(
-    clock: ManualClock, switch: InMemoryPauseSwitch, caplog: pytest.LogCaptureFixture
+    switch: InMemoryPauseSwitch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A process that keeps running without a heartbeat is a process lying to Kuma."""
 

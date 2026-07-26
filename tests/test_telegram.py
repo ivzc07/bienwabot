@@ -8,6 +8,11 @@ from rebe_agent.telegram import TelegramClient, TelegramError
 from tests.telegram_stub import CHAT_ID, TOKEN, FakeTelegram, message
 
 
+@pytest.fixture
+def telegram() -> FakeTelegram:
+    return FakeTelegram()
+
+
 def client_for(fake: FakeTelegram) -> TelegramClient:
     return TelegramClient(TOKEN, CHAT_ID, http_client=fake.client())
 
@@ -66,8 +71,3 @@ async def test_an_update_that_is_not_a_text_message_is_skipped(telegram: FakeTel
     telegram.updates = [[{"update_id": 5}, {"update_id": 6, "message": {"chat": {"id": 1}}}]]
 
     assert await client_for(telegram).poll(offset=0) == []
-
-
-@pytest.fixture
-def telegram() -> FakeTelegram:
-    return FakeTelegram()

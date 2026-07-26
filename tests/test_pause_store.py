@@ -104,6 +104,22 @@ async def test_pausing_an_already_paused_rebe_keeps_the_moment_she_went_quiet(
     assert again.reason == "still too much"
 
 
+async def test_the_table_appears_on_first_use_even_if_boot_never_managed_it(
+    clock: ManualClock,
+) -> None:
+    """Boot is allowed to fail - the database can be seconds behind the container -
+    and a switch that stayed broken until the next redeploy would take the one
+    control path with it."""
+    async with await psycopg.AsyncConnection.connect(DATABASE_URL, autocommit=True) as conn:
+        await conn.execute("DROP TABLE IF EXISTS soft_pause")
+
+    async with open_pool(DATABASE_URL) as pool:
+        never_prepared = PostgresPauseSwitch(pool, clock)
+
+        assert (await never_prepared.state()).paused is False
+        assert (await never_prepared.set_paused(True, reason="cool it")).paused is True
+
+
 async def test_there_is_only_ever_one_switch(
     switch: PostgresPauseSwitch, clock: ManualClock
 ) -> None:

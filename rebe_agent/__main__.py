@@ -32,7 +32,7 @@ from rebe_agent.feeds import WebCandidates
 from rebe_agent.news import NewsLeg
 from rebe_agent.ops import OpsChannel, build_ops
 from rebe_agent.pacer import Pacer, SendRefusedError
-from rebe_agent.pause import PauseState, PostgresPauseSwitch
+from rebe_agent.pause import Pause, PostgresPauseSwitch
 from rebe_agent.posted import PostgresPostedStore
 from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
@@ -157,16 +157,18 @@ def log_startup(settings: Settings, clock: Clock) -> None:
 
 @asynccontextmanager
 async def open_ops(settings: Settings, clock: Clock, pool: Pool) -> AsyncIterator[OpsChannel]:
-    """The ops channel, over its own HTTP client, with the switch's table ready.
+    """The ops channel, over its own HTTP client. The one place it is assembled.
 
-    Every command that can send opens this: the soft pause has to gate a `--say`
-    and a `--post-news` exactly as it gates the running loop, or "Rebe goes
-    silent" would be a promise about one code path out of three.
+    Every command that can send opens this, and so does the run loop: the soft
+    pause has to gate a `--say` and a `--post-news` exactly as it gates the loop,
+    or "Rebe goes silent" would be a promise about one code path out of three.
+
+    The switch's table is created on first use rather than here, so that a
+    database that is briefly unreachable delays the switch instead of stopping the
+    boot that was going to alert about it.
     """
-    switch = PostgresPauseSwitch(pool, clock)
-    await switch.ensure_schema()
     async with httpx.AsyncClient() as http:
-        yield build_ops(settings, clock, switch, http)
+        yield build_ops(settings, clock, PostgresPauseSwitch(pool, clock), http)
 
 
 async def ask_once(settings: Settings, clock: Clock, prompt: str) -> int:
@@ -177,6 +179,9 @@ async def ask_once(settings: Settings, clock: Clock, prompt: str) -> int:
     `rebe` database all take part in one command.
     """
     async with PostgresUsageStore.connect(settings.rebe_database_url.get_secret_value()) as store:
+        # No ops channel here on purpose: this is a smoke test somebody is
+        # watching run, and a failed probe is already on their screen. Waking the
+        # maintainer over Telegram for it would be an alert about nothing.
         brain = build_brain(settings, clock, store)
         try:
             answer = await brain.ask(CallType.PROBE, prompt, Probe)
@@ -304,22 +309,17 @@ def stop_on_signals(stopping: asyncio.Event) -> None:
             )
 
 
-async def report_the_switch(switch: PostgresPauseSwitch) -> None:
-    """Create the switch's table, and log where it stands, or say why it could not.
+async def log_the_soft_pause(pause: Pause) -> None:
+    """Log where the switch stands at boot, or say why it could not be read.
 
-    Bounded and forgiving on purpose. A pause survives a restart, so the one line
-    an operator needs at boot is whether this process starts out silent. But the
-    heartbeat and the control channel are exactly what a maintainer wants alive
-    when the `rebe` database is unreachable, and a boot that waited here would
-    take them down with it - and with them any chance of hearing about it.
+    Bounded and forgiving on purpose. A pause survives a restart, so whether this
+    process starts out silent is the one line an operator needs. But the heartbeat
+    and the control channel are exactly what a maintainer wants alive when the
+    `rebe` database is unreachable, and a boot that waited here would take them
+    down with it - and with them any chance of hearing about it.
     """
-
-    async def read() -> PauseState:
-        await switch.ensure_schema()
-        return await switch.state()
-
     try:
-        state = await asyncio.wait_for(read(), SWITCH_READY_SECONDS)
+        state = await asyncio.wait_for(pause.state(), SWITCH_READY_SECONDS)
     except (TimeoutError, psycopg.Error, PoolTimeout) as exc:
         logger.error(
             "could not read the soft pause switch (%s): %s. The ops channel is "
@@ -330,7 +330,8 @@ async def report_the_switch(switch: PostgresPauseSwitch) -> None:
         return
     if state.paused:
         logger.warning(
-            "starting PAUSED since %s (%s): nothing will be sent until /reanuda",
+            "starting PAUSED since %s (%s): nothing will be sent until an operator "
+            "resumes her from the ops chat",
             state.since.isoformat(timespec="seconds") if state.since else "unknown",
             state.reason or "no reason recorded",
         )
@@ -356,11 +357,9 @@ async def serve(settings: Settings, clock: Clock) -> int:
 
     async with (
         open_pool(settings.rebe_database_url.get_secret_value()) as pool,
-        httpx.AsyncClient() as http,
+        open_ops(settings, clock, pool) as ops,
     ):
-        switch = PostgresPauseSwitch(pool, clock)
-        await report_the_switch(switch)
-        ops = build_ops(settings, clock, switch, http)
+        await log_the_soft_pause(ops.pause)
         logger.info(
             "no legs wired yet; the ops channel is up for instance %s",
             settings.evolution_instance,

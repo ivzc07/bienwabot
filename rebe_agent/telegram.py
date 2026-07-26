@@ -43,7 +43,7 @@ REQUEST_TIMEOUT_SECONDS = 15.0
 REDACTED = "***"
 """What the token is replaced with anywhere an error or a log line could carry it."""
 
-MESSAGE_UPDATES = ["message"]
+MESSAGE_UPDATES = ("message",)
 """The only update type the control channel can answer, so the only one asked for."""
 
 

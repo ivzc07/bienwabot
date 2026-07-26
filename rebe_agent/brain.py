@@ -55,10 +55,11 @@ from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.usage import RunUsage
 
-from rebe_agent.alerts import Alerter, BrainWatch, LoggingAlerter, Watchtower
+from rebe_agent.alerts import Alerter, LoggingAlerter
 from rebe_agent.clock import Clock
 from rebe_agent.config import Settings
 from rebe_agent.guard import CallRateGuard, DailyCallCeilingError
+from rebe_agent.signals import BrainWatch, Watchtower
 from rebe_agent.usage import CallType, CallUsage, UsageStore
 
 logger = logging.getLogger("rebe_agent.brain")

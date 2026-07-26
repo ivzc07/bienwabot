@@ -59,11 +59,11 @@ from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from typing import TypeVar
 
-from rebe_agent.alerts import SendWatch, Watchtower
 from rebe_agent.clock import Clock, RealSleeper, Sleeper
 from rebe_agent.evolution import COMPOSING, PAUSED, EvolutionError, EvolutionSender
 from rebe_agent.pause import NeverPaused, Pause
 from rebe_agent.sends import SendKind, SendLog, SendRecord, fingerprint
+from rebe_agent.signals import SendWatch, Watchtower
 
 logger = logging.getLogger("rebe_agent.pacer")
 

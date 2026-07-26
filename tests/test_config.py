@@ -44,7 +44,7 @@ def test_loads_every_required_variable(env: dict[str, str]) -> None:
     assert settings.rebe_database_url.get_secret_value().endswith("/rebe")
     assert settings.telegram_bot_token.get_secret_value() == "telegram-token-test"
     assert settings.telegram_chat_id == "-1001234567890"
-    assert settings.kuma_push_url == "http://kuma:3001/api/push/abc123"
+    assert settings.kuma_push_url.get_secret_value() == "http://kuma:3001/api/push/abc123"
 
 
 def test_optional_variables_have_spec_defaults(env: dict[str, str]) -> None:
