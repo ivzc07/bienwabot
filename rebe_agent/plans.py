@@ -134,6 +134,7 @@ class PostgresPlanStore:
     def __init__(self, pool: Pool, zone: tzinfo) -> None:
         self._pool = pool
         self._zone = zone
+        self._table_is_there = False
 
     @classmethod
     @asynccontextmanager
@@ -151,8 +152,28 @@ class PostgresPlanStore:
                 await conn.execute(migration)
             for index in INDEXES:
                 await conn.execute(index)
+        self._table_is_there = True
+
+    async def _ready(self) -> None:
+        """Create the table on first use, and try again next time if that failed.
+
+        Boot creates it too, but boot creates it *beside* the server rather than
+        before it, so that a `rebe` database a few seconds behind the container
+        does not stop the process coming up. The scheduler's first act is to read
+        the day's plan, so on an empty database that read raced the `CREATE
+        TABLE` - and a plan store that raised `UndefinedTable` ended the
+        scheduler, which by design takes the process with it. Every first deploy
+        crash-looped until the boot-time preparation happened to win.
+
+        The same guard the soft pause and the ramp already carry, for the same
+        reason: a store that missed its one chance stays broken until somebody
+        redeploys.
+        """
+        if not self._table_is_there:
+            await self.ensure_schema()
 
     async def register(self, plan: DayPlan) -> DayPlan:
+        await self._ready()
         async with self._pool.connection() as conn:
             for slot in plan.slots:
                 await conn.execute(
@@ -163,6 +184,7 @@ class PostgresPlanStore:
         return await self.plan_on(plan.day) or plan
 
     async def plan_on(self, day: date) -> DayPlan | None:
+        await self._ready()
         async with self._pool.connection() as conn:
             cursor = await conn.execute(
                 f"SELECT {SLOT_COLUMNS} FROM planned_slots WHERE day = %s ORDER BY due_at",
@@ -174,6 +196,7 @@ class PostgresPlanStore:
         return DayPlan(day=day, slots=tuple(self._row_to_slot(row) for row in rows))
 
     async def settle(self, day: date, window: str, state: SlotState) -> None:
+        await self._ready()
         async with self._pool.connection() as conn:
             await conn.execute(
                 "UPDATE planned_slots SET state = %s WHERE day = %s AND window_name = %s",
