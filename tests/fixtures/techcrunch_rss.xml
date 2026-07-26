@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Artificial Intelligence | TechCrunch</title>
+    <link>https://techcrunch.com/category/artificial-intelligence/</link>
+    <description>Artificial Intelligence news</description>
+    <item>
+      <title>Una startup mexicana levanta capital para su modelo de voz</title>
+      <link>https://techcrunch.com/2026/07/25/startup-voz-ia/?utm_medium=feed&amp;utm_source=rss</link>
+      <guid isPermaLink="false">https://techcrunch.com/?p=99887</guid>
+      <pubDate>Sat, 25 Jul 2026 10:00:00 +0000</pubDate>
+      <description><![CDATA[<p>La ronda es de <strong>20 millones</strong> de dolares.</p>]]></description>
+    </item>
+    <item>
+      <title>OpenAI ships a model that runs on your laptop</title>
+      <link>https://openai.com/index/local-model</link>
+      <guid isPermaLink="false">https://techcrunch.com/?p=99888</guid>
+      <pubDate>Sat, 25 Jul 2026 15:00:00 +0000</pubDate>
+      <description><![CDATA[<p>Our take on the launch.</p>]]></description>
+    </item>
+  </channel>
+</rss>

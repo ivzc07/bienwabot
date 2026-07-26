@@ -1,0 +1,58 @@
+{
+  "hits": [
+    {
+      "objectID": "41000001",
+      "title": "OpenAI releases a model that runs on your laptop",
+      "url": "https://openai.com/index/local-model?utm_source=hn&utm_medium=social",
+      "author": "swyx",
+      "points": 640,
+      "num_comments": 210,
+      "created_at": "2026-07-25T14:00:00.000Z",
+      "created_at_i": 1784988000,
+      "story_text": null,
+      "_tags": ["story", "author_swyx", "story_41000001"]
+    },
+    {
+      "objectID": "41000002",
+      "title": "Ask HN: which local model do you actually use?",
+      "url": null,
+      "author": "pg",
+      "points": 320,
+      "num_comments": 180,
+      "created_at": "2026-07-25T10:00:00.000Z",
+      "created_at_i": 1784973600,
+      "story_text": "I have been running a few of these on an old ThinkPad and wanted to compare notes.",
+      "_tags": ["story", "ask_hn"]
+    },
+    {
+      "objectID": "41000003",
+      "title": "A short note on attention sinks in small models",
+      "url": "https://arxiv.org/abs/2607.12345",
+      "author": "researcher",
+      "points": 45,
+      "num_comments": 6,
+      "created_at": "2026-07-25T10:00:00.000Z",
+      "created_at_i": 1784973600,
+      "story_text": null,
+      "_tags": ["story"]
+    },
+    {
+      "objectID": "41000004",
+      "title": "Show HN: I built a Spanish speech model for Mexican radio",
+      "url": "https://ejemplo.mx/radio-ia",
+      "author": "lupita",
+      "points": 210,
+      "num_comments": 40,
+      "created_at": "2026-07-25T10:00:00.000Z",
+      "created_at_i": 1784973600,
+      "story_text": "<p>It transcribes <b>norteno</b> radio.</p>",
+      "_tags": ["story", "show_hn"]
+    }
+  ],
+  "nbHits": 4,
+  "page": 0,
+  "nbPages": 1,
+  "hitsPerPage": 50,
+  "query": "AI",
+  "params": "query=AI&tags=story&numericFilters=points%3E%3D100"
+}

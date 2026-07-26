@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>OpenAI News</title>
+  <link rel="self" href="https://openai.com/news/rss.xml"/>
+  <updated>2026-07-25T14:00:00Z</updated>
+  <entry>
+    <title>OpenAI ships a model that runs on your laptop</title>
+    <link rel="self" href="https://openai.com/news/rss.xml"/>
+    <link rel="alternate" href="https://www.openai.com/index/local-model/"/>
+    <id>https://openai.com/index/local-model</id>
+    <published>2026-07-25T13:30:00Z</published>
+    <updated>2026-07-25T13:45:00Z</updated>
+    <summary>&lt;p&gt;The model runs &lt;b&gt;locally&lt;/b&gt;, with no cloud round trip.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>A note with no date at all</title>
+    <link rel="alternate" href="https://openai.com/index/sin-fecha"/>
+    <id>https://openai.com/index/sin-fecha</id>
+    <summary>Nothing here says when it happened.</summary>
+  </entry>
+</feed>
