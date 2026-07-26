@@ -11,3 +11,6 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# uv writes this when a local run resolves the environment; CI installs with pip.
+uv.lock

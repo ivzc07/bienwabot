@@ -27,13 +27,13 @@ from rebe_agent.news import (
     NewsLeg,
     NewsPost,
     PostRejectedError,
-    emoji_count,
     render,
 )
 from rebe_agent.pacer import Envelope, Pacer, SendRefusedError
 from rebe_agent.posted import InMemoryPostedStore
 from rebe_agent.sends import InMemorySendLog, SendKind
 from rebe_agent.usage import CallType, InMemoryUsageStore
+from rebe_agent.voice import emoji_count
 from tests.deepseek_stub import FakeDeepSeek, tool_call_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, NOON, RecordingAlerter, item
