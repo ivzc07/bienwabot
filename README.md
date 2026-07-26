@@ -54,6 +54,7 @@ Four sends a minute, three an hour, twelve a day, counted across both legs; sche
 Every jittered gap is read off the send it is measured against rather than drawn fresh, because a threshold redrawn on each attempt is one a caller can retry its way past - which would quietly turn "75 to 90 minutes" into a flat 75.
 A refusal is a `SendRefusedError` carrying a reason and, where it is knowable, how long until the door opens - so a caller can tell "come back in forty minutes" from "Evolution is down", which is an `EvolutionError` instead.
 The out-of-band soft pause is the other thing it will say no to, read fresh before every send, and a failed send is reported to the ops channel from here because this is the only place a send can fail.
+The post-pairing ramp is read here too, for the same reason: its clamp on the day covers the drawn slots and the breaking-news overrides alike, and its halt covers both legs.
 Deciding between deferring a post and dropping it belongs to the cadence leg, not here.
 
 Every send is written to the `rebe` database before it goes on the wire, so a restart cannot hand a crash loop a fresh allowance, and a transport failure cannot turn a retry into a burst.
@@ -160,7 +161,7 @@ Each alert carries what happened, whether Rebe is still sending, and what to do 
 Repeats of one signal are collapsed into one message per half hour and counted into the next one, because an alert storm is the same as no alerts.
 
 The two ban shapes also stop her, by flipping the same switch an operator uses, since "stop sending, do not keep hammering" needs a mechanism and that is the one there is.
-A dropped connection does not: Evolution reconnects on its own, and a pause nobody undoes is worse than a few failed sends.
+A dropped connection and a rate limit stop her too, through the ramp rather than through the switch - see below - because those come back on their own and the operator's switch must not be undone by anything but the operator.
 
 **The soft pause.** `/pausa [motivo]` in the ops chat and Rebe goes quiet while staying in the group; `/reanuda` and she carries on; `/estado` says where the switch stands.
 The switch is a row in the `rebe` database, so a redeploy does not silently undo it, and the pacer reads it before every send - which is what makes one switch cover posts and replies alike, `--say` and `--post-news` included.
@@ -169,6 +170,23 @@ The heartbeat keeps flowing and the scheduler keeps ticking throughout, so a pau
 
 There is deliberately no in-group command - no "Rebe pausa", nothing a member could see and read as a bot - and a Telegram message from any chat other than `TELEGRAM_CHAT_ID` gets silence rather than an answer.
 The hard stop is not code at all: an admin removes her number from the group like any departing member.
+
+## The ramp
+
+`rebe_agent/ramp.py` is what makes Rebe start quiet and stay quiet when WhatsApp pushes back.
+It is the last safety behaviour before go-live, and the full operational detail is in [`docs/wayfinder/ramp-and-recovery-runbook.md`](docs/wayfinder/ramp-and-recovery-runbook.md).
+
+For the first week after the number is paired the day is clamped to three news posts, whatever the cadence plan drew; the second week it is four; after two clean weeks the cadence spec's steady state applies with no clamp.
+Replies are not clamped at any point.
+The start date is a row in the `rebe` database, so a restart neither resets nor skips the ramp, and an idle gap of 72 hours or more or a reconnect puts her back on the week-one clamp - a cold resume at full rate is a documented way to trip the 463 reach-out limit.
+
+A 463 or a 429 stops every send for an hour rather than retrying it, and each fresh push-back restarts the hour.
+An Evolution `connection.update` that says the link is down stops sending until the link is back, and each repeated disconnect extends the hold, so a real outage stays held while a lost `open` event costs half an hour rather than an indefinite silence.
+The heartbeat keeps flowing through all of it, which is how a maintainer tells "the agent is alive and the number is not sending" from "the process is down".
+
+There is no automatic swap to the backup number, ever.
+Auto-switching on a possibly-false ban signal would burn the only warm standby and leave the bot cold with no backup, so a permanent ban stops everything and waits for a human.
+Which instance is live is `EVOLUTION_INSTANCE`, read in one place and never written, and the swap is the manual procedure in the runbook.
 
 ## Working on it
 

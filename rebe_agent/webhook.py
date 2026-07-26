@@ -23,6 +23,12 @@ by watching the response.
 **The work happens after the response.** A reply spends seconds looking like it
 is being typed, and Evolution should not be holding a connection open through
 them. The handler hands the event to a background task and answers immediately.
+
+Two events arrive here, because the deployment spec has each instance subscribe
+to two. `messages.upsert` is the reply leg's. `connection.update` is the link's,
+and it goes to a `LinkWatch` - which is how a disconnect stops sending and a
+reconnect puts Rebe back on the post-pairing ramp. This module decides neither;
+it only makes sure the event gets to something that does.
 """
 
 from __future__ import annotations
@@ -33,8 +39,9 @@ from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
-from rebe_agent.inbound import InboundMessage, parse
+from rebe_agent.inbound import ConnectionUpdate, InboundMessage, parse, parse_connection
 from rebe_agent.reply import ReplyLeg
+from rebe_agent.signals import LinkWatch
 
 logger = logging.getLogger("rebe_agent.webhook")
 
@@ -51,8 +58,13 @@ ACCEPTED: dict[str, str] = {"status": "accepted"}
 """The only body this endpoint ever returns. It says nothing about Rebe."""
 
 
-def build_app(leg: ReplyLeg, secret: str) -> FastAPI:
-    """The ASGI app: one route, one token, one leg behind it."""
+def build_app(leg: ReplyLeg, secret: str, *, link: LinkWatch | None = None) -> FastAPI:
+    """The ASGI app: one route, one token, and the legs behind it.
+
+    `link` is optional so that a test about the reply path does not have to stand
+    up a ramp to exercise it. The serving process always wires one: without it,
+    the disconnect that stops sending would never reach anything.
+    """
     app = FastAPI(title="rebe-agent webhook", docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.post(WEBHOOK_PATH)
@@ -62,12 +74,21 @@ def build_app(leg: ReplyLeg, secret: str) -> FastAPI:
             raise HTTPException(status_code=404, detail="Not Found")
 
         body = await _body(request)
-        message = parse(body) if body is not None else None
-        if message is None:
-            logger.debug("nothing to act on in this delivery")
+        if body is None:
             return dict(ACCEPTED)
 
-        background.add_task(_handle, leg, message)
+        message = parse(body)
+        if message is not None:
+            background.add_task(_handle, leg, message)
+            return dict(ACCEPTED)
+
+        if link is not None:
+            update = parse_connection(body)
+            if update is not None:
+                background.add_task(_link_changed, link, update)
+                return dict(ACCEPTED)
+
+        logger.debug("nothing to act on in this delivery")
         return dict(ACCEPTED)
 
     return app
@@ -95,3 +116,16 @@ async def _handle(leg: ReplyLeg, message: InboundMessage) -> None:
         await leg.handle(message)
     except Exception:
         logger.exception("the reply leg failed on %s", message.message_id)
+
+
+async def _link_changed(link: LinkWatch, update: ConnectionUpdate) -> None:
+    """Report one connection state change, and let nothing out of it reach the wire.
+
+    The watchtower already swallows its own failures. This is the backstop for
+    the unexpected one, for the same reason `_handle` has one: a background task
+    that raised would take the traceback and nothing else.
+    """
+    try:
+        await link.connection_changed(update.state, reason=update.reason)
+    except Exception:
+        logger.exception("the link watch failed on a %r connection update", update.state)

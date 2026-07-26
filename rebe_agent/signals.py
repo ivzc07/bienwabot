@@ -13,23 +13,34 @@ decision: the temporary shape wants waiting out, the permanent one wants the
 backup number, and getting those two the wrong way round either burns the only
 warm standby or leaves Rebe dead for good.
 
+Three of them also move the *ramp* in `rebe_agent.ramp`, which is the other half
+of the same answer: a 463 or a 429 backs sending off rather than retrying it, a
+link that has gone down stops sending until it is back, and a link that comes
+back resumes on the week-one clamp instead of at the previous rate. That is
+section 5 of the deployment spec read literally, and it is deliberately not the
+soft pause: the pause is the operator's, and a signal that flipped it would need
+an automatic unflip, which is how a human's deliberate "cool it for a bit" gets
+silently undone by a reconnect.
+
 `Watchtower` is where an observation becomes a signal, and the seams it satisfies
-(`SendWatch`, `BrainWatch`) are how the pacer and the brain report without knowing
-any of this. Nothing here raises: both of those hooks are called from inside an
-`except` block, so an exception here would replace the failure being handled with
-one about the telling of it.
+(`SendWatch`, `BrainWatch`, `LinkWatch`) are how the pacer, the brain and the
+webhook leg report without knowing any of this. Nothing here raises: those hooks
+are called from inside an `except` block or from a background task, so an
+exception here would replace the failure being handled with one about the telling
+of it.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from enum import StrEnum
 from typing import Protocol
 
 from rebe_agent.alerts import Alerter, LoggingAlerter
 from rebe_agent.evolution import EvolutionError, EvolutionRateLimitedError
 from rebe_agent.pause import PauseSwitch
+from rebe_agent.ramp import Ramp
 
 logger = logging.getLogger("rebe_agent.signals")
 
@@ -107,6 +118,14 @@ PAUSED_NOTE = "Rebe is now paused and will send nothing until you resume her fro
 DISCONNECTED_STATES = frozenset({"close", "closed", "disconnected"})
 """Evolution's `connection.update` states that mean the link is not usable."""
 
+CONNECTED_STATES = frozenset({"open", "connected"})
+"""The states that mean the link is usable again.
+
+Named rather than inferred from "not disconnected", because Baileys also reports
+`connecting`, and a half-open socket is neither a reason to stop sending nor a
+reconnect to come back from.
+"""
+
 LOGGED_OUT = 401
 FORBIDDEN = 403
 
@@ -145,6 +164,19 @@ class SendWatch(Protocol):
         """Report one failed send. Never raises: the caller has its own problem."""
 
 
+class LinkWatch(Protocol):
+    """Told what Evolution says about the WhatsApp link.
+
+    The webhook leg's seam, for the `connection.update` event the deployment spec
+    has each instance subscribe to. A protocol for the same reason `SendWatch` is:
+    the leg that receives the delivery has no business knowing what a disconnect
+    does to the ramp, only that somebody is listening.
+    """
+
+    async def connection_changed(self, state: str, *, reason: int | None = None) -> None:
+        """Report one connection state change. Never raises."""
+
+
 class Watchtower:
     """Turns what the agent observed into one out-of-band alert a human can act on.
 
@@ -153,9 +185,16 @@ class Watchtower:
     in one place rather than guessing at from a log line.
     """
 
-    def __init__(self, alerter: Alerter | None = None, *, pause: PauseSwitch | None = None) -> None:
+    def __init__(
+        self,
+        alerter: Alerter | None = None,
+        *,
+        pause: PauseSwitch | None = None,
+        ramp: Ramp | None = None,
+    ) -> None:
         self._alerter = alerter or LoggingAlerter()
         self._pause = pause
+        self._ramp = ramp
 
     async def send_failed(self, error: EvolutionError) -> None:
         """The pacer's hook: a message did not get out.
@@ -164,8 +203,14 @@ class Watchtower:
         other transport failure is still worth one throttled line, because a bot
         that cannot send and says nothing looks exactly like a bot with nothing
         to say.
+
+        Only the rate limit backs sending off. A 500 from Evolution is a broken
+        hop rather than WhatsApp pushing back, and holding the day shut over one
+        would be an outage the playbook never asked for.
         """
         rate_limited = isinstance(error, EvolutionRateLimitedError)
+        if rate_limited:
+            await self._tell_the_ramp("back off", lambda ramp: ramp.back_off(str(error)))
         await self.report(
             Signal.RATE_LIMITED if rate_limited else Signal.SEND_FAILED, detail=str(error)
         )
@@ -176,25 +221,36 @@ class Watchtower:
         Called by whatever receives that webhook - the webhook leg, which is its
         own ticket - so until then this is reached from the tests only.
 
-        A link that is up is not news. A link that is down is, and if Baileys
-        named a reason that reads as a ban, it is different news again.
+        A link that is down stops all sending and is worth waking somebody for,
+        and if Baileys named a reason that reads as a ban it is different news
+        again. A link that is *up* is not an alert, but it is not nothing either:
+        section 4 of the playbook says a cold resume at full rate is how the 463
+        reach-out limit gets tripped, so a reconnect puts her back on the
+        week-one clamp. Anything else Baileys reports - `connecting`, most of all
+        - changes neither.
 
-        Section 5 of the deployment spec answers a plain disconnect with "pause all
-        sending", and this deliberately does not touch the switch: Evolution is
-        already refusing every send while the link is down, Evolution reconnects on
-        its own, and the soft pause is the *operator's*. Flipping it here would
-        need an automatic unflip, which is how a human's deliberate "cool it for a
-        bit" gets silently undone by a reconnect. The ban shapes are different -
-        those wait for a human by design.
+        Section 5 of the deployment spec answers a plain disconnect with "pause
+        all sending", and the mechanism is the ramp's halt rather than the soft
+        pause. The switch is the *operator's*: flipping it here would need an
+        automatic unflip, which is how a human's deliberate "cool it for a bit"
+        gets silently undone by a reconnect. The ban shapes do flip it - those
+        wait for a human by design.
+
+        The heartbeat is untouched throughout, which is the distinction the whole
+        alert exists to draw: the agent is alive, the number is not sending.
         """
-        if state.strip().casefold() not in DISCONNECTED_STATES:
+        said = state.strip().casefold()
+        if said in CONNECTED_STATES:
+            await self._tell_the_ramp("resume after a reconnect", lambda ramp: ramp.link_up())
             return
-        signal = BAN_REASONS.get(reason, Signal.DISCONNECTED) if reason is not None else None
+        if said not in DISCONNECTED_STATES:
+            return
+
         described = f", reason {reason}" if reason is not None else ""
-        await self.report(
-            signal or Signal.DISCONNECTED,
-            detail=f"Evolution reports the connection as {state!r}{described}.",
-        )
+        detail = f"Evolution reports the connection as {state!r}{described}."
+        await self._tell_the_ramp("stop sending", lambda ramp: ramp.link_down(detail))
+        signal = BAN_REASONS.get(reason, Signal.DISCONNECTED) if reason is not None else None
+        await self.report(signal or Signal.DISCONNECTED, detail=detail)
 
     async def brain_failed(self, error: BaseException) -> None:
         """The brain's hook: DeepSeek gave no usable answer and the item was dropped."""
@@ -234,3 +290,17 @@ class Watchtower:
             logger.error("could not pause after %s: %s", signal, exc)
             return False
         return True
+
+    async def _tell_the_ramp(self, what: str, move: Callable[[Ramp], Awaitable[None]]) -> None:
+        """Move the ramp, and never let that be why an alert did not go out.
+
+        Same forgiveness as the switch above, and for the same reason: the `rebe`
+        database being briefly unreachable must not swallow the news that the
+        link is down, which is exactly the moment somebody needs to hear it.
+        """
+        if self._ramp is None:
+            return
+        try:
+            await move(self._ramp)
+        except Exception as exc:
+            logger.error("could not %s: %s", what, exc)
