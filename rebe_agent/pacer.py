@@ -40,6 +40,13 @@ and because the ramp in section 1 of the playbook exists to move these numbers.
 A `SendRefusedError` is not an `EvolutionError`. One means the envelope said no
 and the message can be tried later; the other means the transport is broken. A
 caller that cannot tell them apart cannot do the right thing with either.
+
+Two seams hang off the ops channel of ticket #23, and both are here rather than
+in either leg for the same reason the ceilings are: this is the one place a
+message leaves through. The out-of-band soft pause is read before every send, so
+one switch silences posts and replies together; and a send that fails in
+transport is reported to a `SendWatch`, because a 463 or a temporary ban is only
+ever seen right here.
 """
 
 from __future__ import annotations
@@ -54,7 +61,9 @@ from typing import TypeVar
 
 from rebe_agent.clock import Clock, RealSleeper, Sleeper
 from rebe_agent.evolution import COMPOSING, PAUSED, EvolutionError, EvolutionSender
+from rebe_agent.pause import NeverPaused, Pause
 from rebe_agent.sends import SendKind, SendLog, SendRecord, fingerprint
+from rebe_agent.signals import SendWatch, Watchtower
 
 logger = logging.getLogger("rebe_agent.pacer")
 
@@ -73,6 +82,9 @@ _Spreadable = TypeVar("_Spreadable", timedelta, float)
 
 class RefusalReason(StrEnum):
     """Why the envelope said no. The caller decides between deferring and dropping."""
+
+    SOFT_PAUSE = "soft_pause"
+    """The out-of-band soft pause is on. Nothing goes out until a human flips it."""
 
     DUPLICATE = "duplicate"
     """The previous message had identical wording."""
@@ -194,6 +206,8 @@ class Pacer:
         typing: TypingProfile | None = None,
         sleeper: Sleeper | None = None,
         rng: random.Random | None = None,
+        pause: Pause | None = None,
+        watch: SendWatch | None = None,
     ) -> None:
         self._client = client
         self._log = log
@@ -202,6 +216,8 @@ class Pacer:
         self._typing = typing or TypingProfile()
         self._sleeper = sleeper or RealSleeper()
         self._rng = rng or random.Random()
+        self._pause = pause or NeverPaused()
+        self._watch = watch or Watchtower()
         # Held for the whole send, typing pause included. Two things fall out of
         # that: the ceilings cannot be read by two callers at once and both act
         # on the same number, and Rebe is never typing two messages at the same
@@ -218,7 +234,13 @@ class Pacer:
             raise ValueError("refusing to send an empty message")
 
         async with self._turnstile:
-            # The minute floor first, so every rule below is judged on the clock
+            # The soft pause first, and before anything is waited on: an operator
+            # who asked for silence gets it now, not after a minute-long hold,
+            # and the group never sees a typing indicator for a message that is
+            # not coming.
+            await self._check_the_pause()
+
+            # The minute floor next, so every rule below is judged on the clock
             # as it will be when the message actually goes out. A wait of up to
             # a minute can cross 23:00 or a local midnight, and a decision made
             # on the time before the wait would be a decision about the past.
@@ -231,6 +253,22 @@ class Pacer:
             typing_seconds = self._draw_typing_seconds(text)
             await self._type_for(chat, typing_seconds)
             return await self._deliver(kind, chat, text, waited, typing_seconds)
+
+    async def _check_the_pause(self) -> None:
+        """Refuse everything while the out-of-band switch is on.
+
+        Read on every send rather than once at boot, because the point of the
+        switch is to silence a process that is already running. Nothing is
+        queued: a refusal here means the message is dropped, so unpausing resumes
+        normal behaviour instead of firing a backlog at the group.
+        """
+        state = await self._pause.state()
+        if state.paused:
+            raise SendRefusedError(
+                RefusalReason.SOFT_PAUSE,
+                f"the soft pause is on{f' ({state.reason})' if state.reason else ''}; "
+                f"nothing goes out until an operator flips it back",
+            )
 
     async def _check_ceilings(self, kind: SendKind, text: str, now: datetime) -> None:
         """Every rule that can answer "no". Raises, or returns having said nothing."""
@@ -378,7 +416,14 @@ class Pacer:
                 fingerprint=fingerprint(text),
             )
         )
-        message_id = await self._client.send_text(chat, text)
+        try:
+            message_id = await self._client.send_text(chat, text)
+        except EvolutionError as exc:
+            # A 463 reach-out time-lock, a temp ban, an Evolution that is down:
+            # section 4 of the playbook answers all of them with "back off and
+            # tell the maintainer", and this is the only place a send can fail.
+            await self._watch.send_failed(exc)
+            raise
         await self._settle(chat)
         logger.info(
             "sent a %s to %s after %.1fs typing (%.1fs paced), message id %s",

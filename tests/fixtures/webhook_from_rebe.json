@@ -1,0 +1,25 @@
+{
+  "event": "messages.upsert",
+  "instance": "bien-rebe",
+  "data": {
+    "key": {
+      "remoteJid": "120363000000000000@g.us",
+      "fromMe": true,
+      "id": "STUB-MESSAGE-ID",
+      "participant": "5215551234567@s.whatsapp.net"
+    },
+    "pushName": "Rebe",
+    "messageType": "conversation",
+    "message": {
+      "conversation": "miren salio un modelo que corre en tu compu\nhttps://openai.com/index/local-model"
+    },
+    "messageTimestamp": 1785002400,
+    "instanceId": "b1a7f0f2-0000-4000-8000-000000000001",
+    "source": "unknown"
+  },
+  "destination": "http://rebe-agent:8000/webhook/webhook-secret-test",
+  "date_time": "2026-07-25T12:00:00.000Z",
+  "sender": "5215551234567@s.whatsapp.net",
+  "server_url": "http://bien-evo:8080",
+  "apikey": "evo-key-test"
+}
