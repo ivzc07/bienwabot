@@ -62,7 +62,7 @@ from typing import TypeVar
 from rebe_agent.clock import Clock, RealSleeper, Sleeper
 from rebe_agent.evolution import COMPOSING, PAUSED, EvolutionError, EvolutionSender
 from rebe_agent.pause import NeverPaused, Pause
-from rebe_agent.sends import SendKind, SendLog, SendRecord, fingerprint
+from rebe_agent.sends import SendKind, SendLog, SendRecord, fingerprint, stable_fraction
 from rebe_agent.signals import SendWatch, Watchtower
 
 logger = logging.getLogger("rebe_agent.pacer")
@@ -335,7 +335,7 @@ class Pacer:
         if last_post is None:
             return
         low, high = self._envelope.post_gap
-        required = _spread(low, high, _stable_fraction(last_post))
+        required = _spread(low, high, stable_fraction(last_post))
         elapsed = now - last_post.sent_at
         if elapsed < required:
             raise SendRefusedError(
@@ -356,7 +356,7 @@ class Pacer:
         """
         band = self._envelope.night_hush
         low, high = self._envelope.night_hush_slowdown
-        required = self._envelope.spacing * _spread(low, high, _stable_fraction(previous))
+        required = self._envelope.spacing * _spread(low, high, stable_fraction(previous))
         elapsed = now - previous.sent_at
         if elapsed < required:
             raise SendRefusedError(
@@ -487,19 +487,6 @@ class Pacer:
     def _local_day(self, moment: datetime) -> date:
         """The day in the agent's zone. "Twelve a day" is about the group's day."""
         return moment.astimezone(self._clock.zone).date()
-
-
-def _stable_fraction(send: SendRecord) -> float:
-    """A number in `[0, 1)` that is always the same for the same send.
-
-    This is what makes a jittered gap a gap rather than a lottery. Drawing fresh
-    on each attempt would let a caller that retries every minute keep rolling
-    until it got the shortest gap on offer, so "75 to 90 minutes" would settle at
-    75 for everyone who asks twice. Reading the number off the previous send
-    instead means every attempt gets the same answer, and it survives a restart
-    because the fingerprint it comes from is in the database.
-    """
-    return int(send.fingerprint[:8], 16) / 0x1_0000_0000
 
 
 def _spread(low: _Spreadable, high: _Spreadable, fraction: float) -> _Spreadable:

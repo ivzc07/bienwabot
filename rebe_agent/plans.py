@@ -34,6 +34,7 @@ from typing import Protocol
 
 from rebe_agent.cadence import DayPlan, Slot, SlotState
 from rebe_agent.db import Pool, open_pool
+from rebe_agent.tiers import Tier
 
 
 class PlanStore(Protocol):
@@ -82,7 +83,13 @@ class InMemoryPlanStore:
         slots = self._days.get(day, [])
         for index, slot in enumerate(slots):
             if slot.window == window:
-                slots[index] = Slot(window=slot.window, at=slot.at, closes=slot.closes, state=state)
+                slots[index] = Slot(
+                    window=slot.window,
+                    at=slot.at,
+                    closes=slot.closes,
+                    state=state,
+                    tier=slot.tier,
+                )
 
 
 def _in_order(day: date, slots: Iterable[Slot]) -> DayPlan:
@@ -97,9 +104,17 @@ CREATE TABLE IF NOT EXISTS planned_slots (
     window_name text        NOT NULL,
     due_at      timestamptz NOT NULL,
     closes_at   timestamptz NOT NULL,
-    state       text        NOT NULL
+    state       text        NOT NULL,
+    tier        text        NOT NULL DEFAULT 'normal'
 )
 """
+
+MIGRATIONS = (
+    # `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists, so
+    # the column a running deployment does not have yet is added here. The default
+    # is what every row written before section 4 landed already meant.
+    "ALTER TABLE planned_slots ADD COLUMN IF NOT EXISTS tier text NOT NULL DEFAULT 'normal'",
+)
 
 INDEXES = (
     # Unique, and load-bearing rather than tidy: it is what makes a second roll of
@@ -107,7 +122,7 @@ INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS planned_slots_day_idx ON planned_slots (day, window_name)",
 )
 
-SLOT_COLUMNS = "window_name, due_at, closes_at, state"
+SLOT_COLUMNS = "window_name, due_at, closes_at, state, tier"
 """Everything a `Slot` is made of. The day is the key, so it is read separately."""
 
 COLUMNS = f"day, {SLOT_COLUMNS}"
@@ -132,6 +147,8 @@ class PostgresPlanStore:
     async def ensure_schema(self) -> None:
         async with self._pool.connection() as conn:
             await conn.execute(SCHEMA)
+            for migration in MIGRATIONS:
+                await conn.execute(migration)
             for index in INDEXES:
                 await conn.execute(index)
 
@@ -139,9 +156,9 @@ class PostgresPlanStore:
         async with self._pool.connection() as conn:
             for slot in plan.slots:
                 await conn.execute(
-                    f"INSERT INTO planned_slots ({COLUMNS}) VALUES (%s, %s, %s, %s, %s) "
+                    f"INSERT INTO planned_slots ({COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s) "
                     f"ON CONFLICT (day, window_name) DO NOTHING",
-                    (plan.day, slot.window, slot.at, slot.closes, str(slot.state)),
+                    (plan.day, slot.window, slot.at, slot.closes, str(slot.state), str(slot.tier)),
                 )
         return await self.plan_on(plan.day) or plan
 
@@ -164,11 +181,12 @@ class PostgresPlanStore:
             )
 
     def _row_to_slot(self, row: tuple[object, ...]) -> Slot:
-        window, due_at, closes_at, state = row
+        window, due_at, closes_at, state, tier = row
         assert isinstance(due_at, datetime) and isinstance(closes_at, datetime)
         return Slot(
             window=str(window),
             at=due_at.astimezone(self._zone),
             closes=closes_at.astimezone(self._zone),
             state=SlotState(str(state)),
+            tier=Tier(str(tier)),
         )

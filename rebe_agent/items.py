@@ -131,18 +131,27 @@ def _is_tracking(name: str) -> bool:
     return lowered in TRACKING_PARAMS or lowered.startswith(TRACKING_PREFIXES)
 
 
-def title_hash(title: str) -> str:
-    """A stable hash of the headline, blind to case, accents and punctuation.
+def folded(text: str) -> str:
+    """The words of a headline, blind to case, accents and punctuation.
 
     Mexican Spanish headlines lose accents in the wild constantly - a feed
     summary drops them, an aggregator re-types them - and "Un modelo mas rapido"
-    is not a second story. Folding them away is what makes this layer catch the
-    repost it exists for rather than only exact reprints.
+    is not a second story. Folding them away is what makes the repost gate catch
+    the repost it exists for rather than only exact reprints.
+
+    Shared with `rebe_agent.tiers`, which reads a headline for the words that
+    make an item an announcement. One folding, so "what two titles are the same"
+    and "what a title says" can never disagree about what a title is.
     """
-    decomposed = unicodedata.normalize("NFKD", title)
+    decomposed = unicodedata.normalize("NFKD", text)
     unaccented = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     words = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in unaccented).split()
-    return hashlib.sha256(" ".join(words).casefold().encode("utf-8")).hexdigest()
+    return " ".join(words).casefold()
+
+
+def title_hash(title: str) -> str:
+    """A stable hash of the headline, blind to case, accents and punctuation."""
+    return hashlib.sha256(folded(title).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

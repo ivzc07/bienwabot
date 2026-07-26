@@ -25,6 +25,7 @@ from psycopg_pool import PoolTimeout
 
 from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
+from rebe_agent.breaking import Breaking
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
 from rebe_agent.curate import DEFAULT_FILTERS
@@ -34,6 +35,7 @@ from rebe_agent.feeds import WebCandidates
 from rebe_agent.memory import PostgresGroupMemory
 from rebe_agent.news import NewsLeg
 from rebe_agent.ops import OpsChannel, build_ops
+from rebe_agent.overnight import PostgresOvernightQueue
 from rebe_agent.pacer import Pacer, SendRefusedError
 from rebe_agent.pause import Pause, PostgresPauseSwitch
 from rebe_agent.plans import PostgresPlanStore
@@ -259,6 +261,7 @@ class NewsStack:
     sends: PostgresSendLog
     posted: PostgresPostedStore
     plans: PostgresPlanStore
+    overnight: PostgresOvernightQueue
 
     async def ensure_schema(self) -> None:
         """Make sure every table this stack writes to exists."""
@@ -266,6 +269,7 @@ class NewsStack:
         await self.sends.ensure_schema()
         await self.posted.ensure_schema()
         await self.plans.ensure_schema()
+        await self.overnight.ensure_schema()
 
 
 def build_news_stack(
@@ -290,6 +294,7 @@ def build_news_stack(
     sends = PostgresSendLog(pool)
     posted = PostgresPostedStore(pool)
     plans = PostgresPlanStore(pool, settings.zone)
+    overnight = PostgresOvernightQueue(pool)
     pacer = Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower)
 
     # One `Filters` for both halves: the fetch asks each source for exactly
@@ -302,7 +307,15 @@ def build_news_stack(
         clock,
         filters=DEFAULT_FILTERS,
     )
-    return NewsStack(leg=leg, pacer=pacer, usage=usage, sends=sends, posted=posted, plans=plans)
+    return NewsStack(
+        leg=leg,
+        pacer=pacer,
+        usage=usage,
+        sends=sends,
+        posted=posted,
+        plans=plans,
+        overnight=overnight,
+    )
 
 
 async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int) -> int:
@@ -450,7 +463,25 @@ async def serve(settings: Settings, clock: Clock) -> int:
             evolution,
             memory,
         )
-        scheduler = Scheduler(stack.leg, settings.rebe_group_jid, stack.plans, stack.sends, clock)
+        # The override leg posts through the same news leg and the same pacer the
+        # drawn slots do, so "important news is never held back by the quota"
+        # never becomes "important news is never held back".
+        breaking = Breaking(
+            stack.leg,
+            settings.rebe_group_jid,
+            stack.plans,
+            stack.sends,
+            stack.overnight,
+            clock,
+        )
+        scheduler = Scheduler(
+            stack.leg,
+            settings.rebe_group_jid,
+            stack.plans,
+            stack.sends,
+            clock,
+            breaking=breaking,
+        )
         server = EmbeddedServer(
             uvicorn.Config(
                 build_app(reply, settings.webhook_secret.get_secret_value()),

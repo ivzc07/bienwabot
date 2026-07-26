@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Google DeepMind Blog</title>
+  <link rel="self" href="https://deepmind.google/blog/rss.xml"/>
+  <updated>2026-07-25T17:00:00Z</updated>
+  <entry>
+    <title>Introducing Gemini Nano 3, our smallest model yet</title>
+    <link rel="alternate" href="https://deepmind.google/discover/blog/gemini-nano-3/"/>
+    <id>https://deepmind.google/discover/blog/gemini-nano-3</id>
+    <published>2026-07-25T16:00:00Z</published>
+    <summary>&lt;p&gt;It runs on a phone, and it is available today in the API.&lt;/p&gt;</summary>
+  </entry>
+  <entry>
+    <title>Why small models are changing how we build agents</title>
+    <link rel="alternate" href="https://deepmind.google/discover/blog/small-models-agents/"/>
+    <id>https://deepmind.google/discover/blog/small-models-agents</id>
+    <published>2026-07-25T17:00:00Z</published>
+    <summary>Some reflections after the launch of Gemini Nano 3.</summary>
+  </entry>
+</feed>

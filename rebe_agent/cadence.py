@@ -24,6 +24,11 @@ that one keeps it off the wire.
 
 Randomness arrives as a `random.Random` and time arrives as a `date` plus a zone,
 so a test can roll three hundred days of a Wednesday and read the distribution.
+
+The posture numbers sections 4 and 6 add - how often the loop looks up from the
+plan for breaking news, and the practical eight-post stop that bounds a day the
+overrides made long - live on `Cadence` beside the rest of the day's shape, so
+there is one object a ramp tightens rather than four constants in four modules.
 """
 
 from __future__ import annotations
@@ -33,6 +38,8 @@ import random
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, tzinfo
 from enum import StrEnum
+
+from rebe_agent.tiers import Tier
 
 logger = logging.getLogger("rebe_agent.cadence")
 
@@ -125,6 +132,14 @@ class SlotState(StrEnum):
     DROPPED = "dropped"
     """The slot came and went unusable: deferred past its window, or refused."""
 
+    PRUNED = "pruned"
+    """Given up after big news went out on top of the day, per section 4.
+
+    Not the same as `SKIPPED`, and the difference is worth a state of its own: a
+    skipped window had nothing worth posting at all, while a pruned one had
+    something and it was mediocre, on a day that already had its big moment.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class Slot:
@@ -134,6 +149,14 @@ class Slot:
     at: datetime
     closes: datetime
     state: SlotState = SlotState.PLANNED
+    tier: Tier = Tier.NORMAL
+    """Which rule put this slot on the day.
+
+    Every drawn slot is normal tier; a high-tier override writes itself into the
+    day as an extra slot so that the plan stays the record of what happened, and
+    so that a restart can see the day went to five posts rather than four. Section
+    4 is explicit that high-tier slots are never pruned.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +199,22 @@ class Cadence:
 
     grace: timedelta = timedelta(minutes=30)
     """How far past its window edge a deferred post may still go out."""
+
+    watch: tuple[timedelta, timedelta] = (timedelta(minutes=20), timedelta(minutes=40))
+    """How often the loop looks up from the plan to see whether something broke.
+
+    Jittered like everything else, and free: a look costs one HN query and eight
+    feed reads, never a model call. Twenty to forty minutes is the resolution at
+    which "she posted it when she saw it" still reads as a person seeing it.
+    """
+
+    daily_stop: int = 8
+    """The practical stop from section 1, counting posts of both tiers.
+
+    The absolute stop is the anti-ban envelope's twelve sends a day, and the gap
+    between the two numbers is the point: this one shapes a normal day, and that
+    one exists to catch a runaway loop.
+    """
 
     def __post_init__(self) -> None:
         for windows in (self.weekday, self.weekend):

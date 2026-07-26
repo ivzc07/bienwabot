@@ -67,6 +67,23 @@ class SendRecord:
     fingerprint: str
 
 
+def stable_fraction(send: SendRecord) -> float:
+    """A number in `[0, 1)` that is always the same for the same send.
+
+    This is what makes a jittered gap measured from a send a gap rather than a
+    lottery. Drawing fresh on each attempt would let a caller that retries every
+    minute keep rolling until it got the shortest gap on offer, so "75 to 90
+    minutes" would settle at 75 for everyone who asks twice. Reading the number
+    off the send instead means every attempt gets the same answer, and it
+    survives a restart because the fingerprint it comes from is in the database.
+
+    Two callers want that: the pacer, spacing one post from the last one, and the
+    override path, waiting out a conversation it keeps re-checking. One
+    implementation, living next to the fingerprint it reads.
+    """
+    return int(send.fingerprint[:8], 16) / 0x1_0000_0000
+
+
 class SendLog(Protocol):
     """Where the sends live. One implementation is Postgres; one is a list."""
 

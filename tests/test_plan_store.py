@@ -17,6 +17,7 @@ import pytest
 
 from rebe_agent.cadence import DayPlan, Slot, SlotState, moment_on
 from rebe_agent.plans import PostgresPlanStore
+from rebe_agent.tiers import Tier
 from tests.support import MEXICO_CITY
 
 DATABASE_URL = os.environ.get("REBE_TEST_DATABASE_URL", "")
@@ -142,6 +143,43 @@ async def test_settling_a_slot_that_is_not_in_the_plan_is_not_an_error(
     await store.register(PLAN)
 
     await store.settle(WEDNESDAY, "brunch", SlotState.DROPPED)
+
+
+async def test_an_override_slot_keeps_its_tier_across_a_restart(
+    store: PostgresPlanStore,
+) -> None:
+    """A day that went to five posts has to still say so after a redeploy, and
+    which of them jumped the plan is part of what it says."""
+    override = Slot(
+        window="breaking-1",
+        at=moment_on(WEDNESDAY, time(16, 41), MEXICO_CITY),
+        closes=moment_on(WEDNESDAY, time(16, 41), MEXICO_CITY),
+        state=SlotState.POSTED,
+        tier=Tier.HIGH,
+    )
+    await store.register(DayPlan(day=WEDNESDAY, slots=(MORNING, override)))
+
+    async with PostgresPlanStore.connect(DATABASE_URL, MEXICO_CITY) as after_restart:
+        stored = await after_restart.plan_on(WEDNESDAY)
+
+    assert stored is not None
+    assert [(s.window, s.tier, s.state) for s in stored.slots] == [
+        ("morning", Tier.NORMAL, SlotState.PLANNED),
+        ("breaking-1", Tier.HIGH, SlotState.POSTED),
+    ]
+
+
+async def test_a_pruned_slot_is_written_down_as_pruned(store: PostgresPlanStore) -> None:
+    """Pruned is not skipped: one day had nothing worth posting, the other had
+    something mediocre after its big story, and a week of rows should say which."""
+    await store.register(PLAN)
+
+    await store.settle(WEDNESDAY, "midday", SlotState.PRUNED)
+
+    stored = await store.plan_on(WEDNESDAY)
+    assert stored is not None
+    assert stored.slots[1].state is SlotState.PRUNED
+    assert [s.window for s in stored.pending] == ["morning"]
 
 
 async def test_the_stored_datetime_is_the_instant_not_the_wall_clock(
