@@ -16,9 +16,12 @@ from datetime import timedelta
 import psycopg
 import pytest
 
-from rebe_agent.chimeins import CHIME_INS_PER_DAY, ChimeIn, ChimeInBudget, PostgresChimeInLog
+from rebe_agent.chimeins import Allowance, ChimeIn, ChimeInBudget, PostgresChimeInLog
 from rebe_agent.clock import ManualClock
 from tests.support import GROUP, MEXICO_CITY, NOON, TODAY
+
+ALLOWANCE = Allowance(cooldown=timedelta(0))
+"""The cooldown lifted, so these tests are about the count and nothing else."""
 
 DATABASE_URL = os.environ.get("REBE_TEST_DATABASE_URL", "")
 
@@ -72,10 +75,11 @@ async def test_the_ceiling_survives_the_process_it_was_counted_in(
     """The whole reason this is a table: a crash loop must not hand her three
     more unprompted chime-ins every time it comes back up."""
     clock = ManualClock(NOON, MEXICO_CITY)
-    before = ChimeInBudget(log, clock, rng=random.Random(1), cooldown=timedelta(0))
-    for _ in range(CHIME_INS_PER_DAY):
+    before = ChimeInBudget(log, clock, rng=random.Random(1), allowance=ALLOWANCE)
+    for _ in range(ALLOWANCE.per_day):
         await before.spend(GROUP)
 
     async with PostgresChimeInLog.connect(DATABASE_URL) as after_restart:
-        budget = ChimeInBudget(after_restart, clock, rng=random.Random(1), cooldown=timedelta(0))
-        assert await budget.refuses() == f"{CHIME_INS_PER_DAY} unprompted chime-ins today already"
+        budget = ChimeInBudget(after_restart, clock, rng=random.Random(1), allowance=ALLOWANCE)
+        refusal = await budget.refuses()
+        assert refusal is not None and "today already" in refusal

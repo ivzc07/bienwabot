@@ -5,7 +5,7 @@ about AI but was not addressed to her, she *may* chime in. Whether the message
 qualifies is a judgement, and it belongs to the model gate in `rebe_agent.reply`.
 Whether she is allowed to act on it is arithmetic, and it lives here.
 
-Three rules, and they are deliberately three rather than one number:
+Four rules, and they are deliberately four rather than one number:
 
 1. **A probability.** She answers about a quarter of the messages that qualify.
    This is what makes her read as selective; answering every eligible message is
@@ -17,6 +17,11 @@ Three rules, and they are deliberately three rather than one number:
    or six through, and five unprompted comments in a day is a bot.
 3. **A cooldown.** Two unprompted chime-ins inside the same short window read as
    one burst, however far under the daily ceiling they are.
+4. **The near-silent band.** Section 2 of the playbook calls 02:00-06:00 local
+   "replies only if directly addressed", so this tier is closed right through it.
+   The pacer already spreads *everything* four to six times further apart in
+   those hours; what it cannot say is that one kind of message should not be sent
+   at all, because it has no idea which of its callers was invited to speak.
 
 The count is *persisted*, and per local day, for the same reason the send log is:
 a crash loop that forgot how many times she had already spoken up today would
@@ -36,31 +41,51 @@ import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Protocol
 
 from rebe_agent.clock import Clock
 from rebe_agent.db import Pool, open_pool
+from rebe_agent.pacer import Window
 
 logger = logging.getLogger("rebe_agent.chimeins")
 
-CHANCE = 0.25
-"""How often an eligible message becomes a chime-in. "Target ~25%" in the policy."""
+NEAR_SILENT = Window(time(2, 0), time(6, 0))
+"""The hours section 2 of the playbook answers with "replies only if directly
+addressed". The same band the pacer's `Envelope.night_hush` slows every send
+down in, read here for the stronger rule that band also carries."""
 
-CHIME_INS_PER_DAY = 3
-"""The top of the playbook's 2-3 band, and a hard ceiling rather than a target.
 
-The band is what a day should *look* like, and `CHANCE` is what usually produces
-it: a group with a handful of clearly-AI messages a day lands on two or three by
-itself. This number is the backstop for the day that has thirty of them.
-"""
+@dataclass(frozen=True, slots=True)
+class Allowance:
+    """How much unprompted talking a day has room for.
 
-COOLDOWN = timedelta(minutes=90)
-"""How long after one unprompted chime-in the next is refused outright.
+    Parameters rather than constants for the same reason the pacer's `Envelope`
+    is: the post-pairing ramp in section 1 of the playbook exists to move numbers
+    like these, and a test that wants to exercise one rule needs the others out
+    of its way.
+    """
 
-Long enough that two never read as a burst, and wide enough that three in a day
-are spread across it rather than clustered in one hour of it.
-"""
+    chance: float = 0.25
+    """How often an eligible message becomes a chime-in: "target ~25%"."""
+
+    per_day: int = 3
+    """The top of the playbook's 2-3 band, and a ceiling rather than a target.
+
+    The band is what a day should *look* like, and `chance` is what usually
+    produces it: a group with a handful of clearly-AI messages a day lands on two
+    or three by itself. This number is the backstop for the day that has thirty.
+    """
+
+    cooldown: timedelta = timedelta(minutes=90)
+    """How long after one chime-in the next is refused however the roll lands.
+
+    Long enough that two never read as a burst, and wide enough that a day's
+    worth is spread across the day rather than clustered in one hour of it.
+    """
+
+    near_silent: Window = NEAR_SILENT
+    """When she volunteers nothing at all, however the other three rules land."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +97,9 @@ class ChimeIn:
     """The *local* day from the agent's `Clock`. "Three a day" is about her day."""
 
     chat: str
+    """Which group it went to. Nothing reads it - the ceiling and the cooldown are
+    both about Rebe rather than about a room - but a human reading the table can
+    tell what a row was, which is the same reason `posted_items` keeps a title."""
 
 
 class ChimeInLog(Protocol):
@@ -122,63 +150,60 @@ class ChimeInBudget:
         clock: Clock,
         *,
         rng: random.Random | None = None,
-        chance: float = CHANCE,
-        per_day: int = CHIME_INS_PER_DAY,
-        cooldown: timedelta = COOLDOWN,
+        allowance: Allowance | None = None,
     ) -> None:
         self._log = log
         self._clock = clock
         self._rng = rng or random.Random()
-        self._chance = chance
-        self._per_day = per_day
-        self._cooldown = cooldown
+        self._allowance = allowance or Allowance()
 
     async def refuses(self) -> str | None:
         """Why she stays quiet, or `None` to go ahead.
 
-        The ceiling and the cooldown are read before the draw so that a refusal
-        says the thing that is actually true: on a day that is already full, "the
-        roll said no" would be a log line that hid the ceiling doing its job.
+        A sentence rather than a reason code, because nothing branches on it:
+        every answer but `None` ends in the same log line and the same silence.
+
+        The three rules that are *about her* are read before the draw, so that
+        the line says the thing that is actually true. On a day that is already
+        full, "the roll said no" would be a log entry hiding the ceiling doing
+        its job.
         """
-        now = self._clock.now()
-        today = await self._log.count_on(self._local_day(now))
-        if today >= self._per_day:
+        local = self._local(self._clock.now())
+        band = self._allowance.near_silent
+        if band.contains(local.time()):
+            return f"she is near-silent {band} local time unless somebody addresses her"
+
+        today = await self._log.count_on(local.date())
+        if today >= self._allowance.per_day:
             return f"{today} unprompted chime-ins today already"
 
         latest = await self._log.latest()
-        if latest is not None and now - latest.at < self._cooldown:
-            return (
-                f"too soon after the last unprompted chime-in, "
-                f"which was {_minutes(now - latest.at)} ago"
-            )
+        if latest is not None and local - latest.at < self._allowance.cooldown:
+            since = (local - latest.at).total_seconds() / 60
+            return f"the last unprompted chime-in was {since:.0f}m ago, which is too close"
 
-        if self._rng.random() >= self._chance:
-            return f"the roll said no; she chimes in on about {self._chance:.0%} of these"
+        if self._rng.random() >= self._allowance.chance:
+            return f"the roll said no; she chimes in on about {self._allowance.chance:.0%} of these"
         return None
 
     async def spend(self, chat: str) -> None:
         """Count one chime-in that has already landed in `chat`."""
-        now = self._clock.now()
-        await self._log.record(ChimeIn(at=now, day=self._local_day(now), chat=chat))
+        now = self._local(self._clock.now())
+        await self._log.record(ChimeIn(at=now, day=now.date(), chat=chat))
         logger.info("chimed in unprompted in %s", chat)
 
-    def _local_day(self, moment: datetime) -> date:
-        """The day in the agent's zone, the way the pacer counts its own."""
-        return moment.astimezone(self._clock.zone).date()
-
-
-def _minutes(span: timedelta) -> str:
-    """A duration a human reads at a glance, for a log line."""
-    total = span.total_seconds()
-    return f"{total:.0f}s" if total < 90 else f"{total / 60:.0f}m"
+    def _local(self, moment: datetime) -> datetime:
+        """`moment` in the agent's zone, which is the one the day and the band
+        are both statements about."""
+        return moment.astimezone(self._clock.zone)
 
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS chime_ins (
-    id     bigserial   PRIMARY KEY,
+    id      bigserial   PRIMARY KEY,
     said_at timestamptz NOT NULL,
-    day    date        NOT NULL,
-    chat   text        NOT NULL
+    day     date        NOT NULL,
+    chat    text        NOT NULL
 )
 """
 

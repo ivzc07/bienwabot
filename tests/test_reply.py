@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from rebe_agent.brain import Brain, build_brain
-from rebe_agent.chimeins import CHIME_INS_PER_DAY, COOLDOWN, ChimeInBudget, InMemoryChimeInLog
+from rebe_agent.chimeins import Allowance, ChimeInBudget, InMemoryChimeInLog
 from rebe_agent.clock import ManualClock, ManualSleeper
 from rebe_agent.config import Settings, load_settings
 from rebe_agent.evolution import EvolutionClient
@@ -58,6 +58,9 @@ VOICE = "jaja no creo, mas bien te lo hace mas facil"
 
 CHIMED_IN = "pues a mi el nuevo se me hizo mas rapido que el anterior"
 
+ALLOWANCE = Allowance()
+"""The shipped chime-in numbers, for the tests that step over them on purpose."""
+
 YES = 0.0
 """A draw below the chime-in probability: this eligible message becomes one."""
 
@@ -69,9 +72,11 @@ def verdict(topic: Topic | str = Topic.ON_TOPIC, confidence: float = 0.9) -> dic
     return tool_call_response(json.dumps({"topic": str(topic), "confidence": confidence}))
 
 
-def about_ai(is_it: bool = True, confidence: float = 0.9) -> dict[str, Any]:
+def about_ai(is_it: bool = True, *, no_go: bool = False, confidence: float = 0.9) -> dict[str, Any]:
     """The tier-two gate's verdict on a message nobody addressed to her."""
-    return tool_call_response(json.dumps({"about_ai": is_it, "confidence": confidence}))
+    return tool_call_response(
+        json.dumps({"about_ai": is_it, "no_go": no_go, "confidence": confidence})
+    )
 
 
 def wrote(text: str = VOICE) -> dict[str, Any]:
@@ -151,11 +156,11 @@ def make_budget(
     clock: ManualClock,
     *draws: float,
     chime_ins: InMemoryChimeInLog | None = None,
-    per_day: int = CHIME_INS_PER_DAY,
+    allowance: Allowance | None = None,
 ) -> ChimeInBudget:
     """A budget whose rolls a test names outright. No draws means she never does."""
     return ChimeInBudget(
-        chime_ins or InMemoryChimeInLog(), clock, rng=Rolls(*draws), per_day=per_day
+        chime_ins or InMemoryChimeInLog(), clock, rng=Rolls(*draws), allowance=allowance
     )
 
 
@@ -750,6 +755,47 @@ async def test_most_eligible_messages_get_nothing(
     assert len(fake.requests) == 1, "a message she will not send is not worth a second call"
 
 
+async def test_she_does_not_volunteer_an_opinion_on_a_no_go_topic(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """ "¿le entro a las acciones de nvidia por lo de la IA?" is about AI and is
+    also investment advice. Addressed, that would earn one line of "ni idea" so a
+    name-tag is not left hanging. Unaddressed, nothing is hanging: she says
+    nothing at all rather than volunteering a take on somebody's money."""
+    fake = FakeDeepSeek(about_ai(no_go=True), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    handled = await leg.handle(
+        message("chatter", text="oigan, le entro a las acciones de nvidia por lo de la IA?")
+    )
+
+    assert handled is None
+    assert evolution.calls == []
+    assert len(fake.requests) == 1, "the gate said no; nothing was written"
+
+
+async def test_she_volunteers_nothing_in_the_near_silent_hours(
+    settings: Settings, evolution: FakeEvolution, memory: InMemoryGroupMemory
+) -> None:
+    """ "02:00-06:00: near-silent ... replies only if directly addressed." An
+    eligible message, a roll that says yes, an empty day - and 03:30."""
+    clock = ManualClock(NOON.replace(hour=3, minute=30), MEXICO_CITY)
+    leg = make_leg(
+        settings,
+        FakeDeepSeek(about_ai(), wrote(CHIMED_IN)),
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, YES),
+    )
+
+    assert await leg.handle(message("chatter")) is None
+    assert evolution.texts == []
+
+
 async def test_a_gate_that_is_unsure_leaves_the_conversation_alone(
     settings: Settings,
     evolution: FakeEvolution,
@@ -818,21 +864,21 @@ async def test_the_daily_ceiling_stops_her_whatever_the_roll_says(
 ) -> None:
     """Every roll here says yes and the cooldown is stepped over, so the only
     thing left to stop the last one is the ceiling."""
-    fake = _a_different_chime_in_each_time(CHIME_INS_PER_DAY + 1)
+    fake = _a_different_chime_in_each_time(ALLOWANCE.per_day + 1)
     leg = make_leg(
         settings,
         fake,
         evolution,
         memory,
         clock,
-        budget=make_budget(clock, *[YES] * (CHIME_INS_PER_DAY + 1)),
+        budget=make_budget(clock, *[YES] * (ALLOWANCE.per_day + 1)),
     )
 
-    for turn in range(CHIME_INS_PER_DAY + 1):
-        clock.advance(COOLDOWN)
+    for turn in range(ALLOWANCE.per_day + 1):
+        clock.advance(ALLOWANCE.cooldown)
         await leg.handle(_another_ai_message(turn))
 
-    assert len(evolution.texts) == CHIME_INS_PER_DAY
+    assert len(evolution.texts) == ALLOWANCE.per_day
 
 
 async def test_two_chime_ins_never_land_back_to_back(
@@ -852,7 +898,7 @@ async def test_two_chime_ins_never_land_back_to_back(
     )
 
     await leg.handle(_another_ai_message(0))
-    clock.advance(COOLDOWN - timedelta(minutes=5))
+    clock.advance(ALLOWANCE.cooldown - timedelta(minutes=5))
     second = await leg.handle(_another_ai_message(1))
 
     assert second is None
@@ -865,22 +911,29 @@ async def test_an_addressed_reply_still_goes_out_after_the_ceiling(
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    """The two budgets are separate. A day full of chime-ins must never be the
-    reason a name-tag goes unanswered - tier one has no cap at all."""
+    """The two budgets are separate, in both directions. A day spent down to its
+    last chime-in must never be the reason a name-tag goes unanswered - tier one
+    has no cap at all - and answering a name-tag must not spend anything either.
+    """
     chime_ins = InMemoryChimeInLog()
-    fake = FakeDeepSeek(about_ai(), verdict(), wrote())
+    one_a_day = Allowance(per_day=1, cooldown=timedelta(0))
     leg = make_leg(
         settings,
-        fake,
+        FakeDeepSeek(about_ai(), wrote(CHIMED_IN), about_ai(), verdict(), wrote()),
         evolution,
         memory,
         clock,
-        budget=make_budget(clock, YES, chime_ins=chime_ins, per_day=0),
+        budget=make_budget(clock, YES, YES, chime_ins=chime_ins, allowance=one_a_day),
     )
 
-    assert await leg.handle(message("chatter")) is None
+    assert await leg.handle(_another_ai_message(0)) is not None, "the day's one chime-in"
+    clock.advance(timedelta(minutes=5))
+    assert await leg.handle(_another_ai_message(1)) is None, "and the ceiling closes it"
+    clock.advance(timedelta(minutes=5))
+
     assert await leg.handle(message("by_name")) is not None
-    assert evolution.texts == [VOICE]
+    assert evolution.texts == [CHIMED_IN, VOICE]
+    assert await chime_ins.count_on(clock.now().date()) == 1, "the reply cost her nothing"
 
 
 async def test_the_days_count_outlives_the_leg_that_made_it(
@@ -894,14 +947,14 @@ async def test_the_days_count_outlives_the_leg_that_made_it(
     chime_ins = InMemoryChimeInLog()
     before = make_leg(
         settings,
-        _a_different_chime_in_each_time(CHIME_INS_PER_DAY),
+        _a_different_chime_in_each_time(ALLOWANCE.per_day),
         evolution,
         memory,
         clock,
-        budget=make_budget(clock, *[YES] * CHIME_INS_PER_DAY, chime_ins=chime_ins),
+        budget=make_budget(clock, *[YES] * ALLOWANCE.per_day, chime_ins=chime_ins),
     )
-    for turn in range(CHIME_INS_PER_DAY):
-        clock.advance(COOLDOWN)
+    for turn in range(ALLOWANCE.per_day):
+        clock.advance(ALLOWANCE.cooldown)
         await before.handle(_another_ai_message(turn))
 
     after_restart = make_leg(
@@ -912,10 +965,10 @@ async def test_the_days_count_outlives_the_leg_that_made_it(
         clock,
         budget=make_budget(clock, YES, chime_ins=chime_ins),
     )
-    clock.advance(COOLDOWN)
+    clock.advance(ALLOWANCE.cooldown)
 
     assert await after_restart.handle(_another_ai_message(9)) is None
-    assert len(evolution.texts) == CHIME_INS_PER_DAY
+    assert len(evolution.texts) == ALLOWANCE.per_day
 
 
 async def test_the_day_that_is_full_is_the_local_one(
@@ -927,23 +980,23 @@ async def test_the_day_that_is_full_is_the_local_one(
     chime_ins = InMemoryChimeInLog()
     leg = make_leg(
         settings,
-        _a_different_chime_in_each_time(CHIME_INS_PER_DAY + 1),
+        _a_different_chime_in_each_time(ALLOWANCE.per_day + 1),
         evolution,
         memory,
         clock,
-        budget=make_budget(clock, *[YES] * (CHIME_INS_PER_DAY + 1), chime_ins=chime_ins),
+        budget=make_budget(clock, *[YES] * (ALLOWANCE.per_day + 1), chime_ins=chime_ins),
         envelope=Envelope(
             sends_per_hour=99, sends_per_day=99, post_gap=(timedelta(0), timedelta(0))
         ),
     )
-    for turn in range(CHIME_INS_PER_DAY):
-        clock.advance(COOLDOWN)
+    for turn in range(ALLOWANCE.per_day):
+        clock.advance(ALLOWANCE.cooldown)
         await leg.handle(_another_ai_message(turn))
 
     clock.advance(timedelta(hours=3))
 
     assert await leg.handle(_another_ai_message(8)) is None, "19:30 local is still today"
-    assert len(evolution.texts) == CHIME_INS_PER_DAY
+    assert len(evolution.texts) == ALLOWANCE.per_day
 
 
 async def test_a_media_only_message_produces_silence(

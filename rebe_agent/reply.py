@@ -9,7 +9,7 @@ except the question the model is asked and the budget that answers back.
                   -> mark read -> generate
     -> validate -> send through the shared pacer -> remember hers
 
-Six of those steps are worth defending.
+Seven of those steps are worth defending.
 
 **The turn is remembered first, before anything decides whether to answer.**
 Two reasons. A redelivered webhook is refused by that write, so the duplicate
@@ -83,6 +83,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import TypeVar
 
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
@@ -122,6 +123,9 @@ GATE_CONTEXT_TURNS = 3
 """How much of the thread the classification call sees. Section 2 of the token
 budget spec sizes call B at ~400 input tokens, of which the thread is ~150."""
 
+DecisionT = TypeVar("DecisionT", bound="GateDecision")
+"""Whatever shape of answer one tier's gate call asks for."""
+
 
 class Topic(StrEnum):
     """What kind of address this is, which is the only thing the model judges."""
@@ -139,28 +143,40 @@ class Topic(StrEnum):
     """"¿eres un bot?" and its cousins. Deflect in character, never confirm."""
 
 
-class ReplyDecision(BaseModel):
-    """The reply-gate verdict: call B in the token budget spec."""
+class GateDecision(BaseModel):
+    """What every reply-gate call answers with, whatever else it is asked."""
 
-    topic: Topic
     confidence: float = Field(ge=0.0, le=1.0)
     """How sure the classification is. Low confidence buys silence, not a guess."""
 
 
-class ChimeInDecision(BaseModel):
+class ReplyDecision(GateDecision):
+    """The tier-one gate's verdict: call B in the token budget spec."""
+
+    topic: Topic
+
+
+class ChimeInDecision(GateDecision):
     """The tier-two gate's verdict: is this worth having an opinion about at all?
 
     A different question from `ReplyDecision`, and a narrower one. Somebody who
     tags her by name gets an answer whatever they asked about; interrupting a
     conversation she was not part of is only in character when the conversation
-    is about her subject.
+    is about her subject and is not one of the ones she stays out of.
     """
 
     about_ai: bool
     """True only for AI, models, or AI tools. Not "tech", and not a near miss."""
 
-    confidence: float = Field(ge=0.0, le=1.0)
-    """How sure that is. Low confidence buys silence, which is the common case."""
+    no_go: bool
+    """A guardrail topic, however much AI is wrapped around it.
+
+    "¿le entro a las acciones de nvidia por lo de la IA?" is about AI and is also
+    investment advice. Tier one answers that with one line of "ni idea" because a
+    name-tag left hanging is its own tell; tier two has nothing hanging, so the
+    reply policy's deflect-and-drop becomes plain drop. Volunteering an opinion
+    nobody asked for on somebody's money is the worst version of this tier.
+    """
 
 
 class Reply(BaseModel):
@@ -261,6 +277,11 @@ escrito.
 about_ai es false para todo lo demás, incluida la tecnología que no es IA:
 celulares, apps, videojuegos, cripto, redes sociales, programación sin IA de por
 medio, y por supuesto la plática normal del grupo. "Tecnología" no es IA.
+
+no_go es true si el mensaje toca algo en lo que Rebe no se mete, aunque venga
+envuelto en IA: salud, leyes, dinero o inversiones (cripto incluido), política
+partidista o religión, datos personales de algún miembro, o contenido sexual o de
+acoso. "¿le entro a las acciones de nvidia por lo de la IA?" es no_go.
 
 confidence es qué tan claro está, de 0 a 1. Un mensaje que solo roza el tema, o
 que podría ser IA o podría no serlo, lleva confianza baja: meterse donde no la
@@ -463,58 +484,62 @@ class ReplyLeg:
             return None
         return await self._send(message, text, topic)
 
-    async def _classify(
-        self, message: InboundMessage, history: Sequence[Turn]
-    ) -> ReplyDecision | None:
-        """Call B: what kind of address this is, or `None` for stay quiet."""
-        try:
-            decision = await self._brain.ask(
-                CallType.REPLY_GATE,
-                _gate_prompt(message, history),
-                ReplyDecision,
-                instructions=RUBRIC,
-            )
-        except BrainError as exc:
-            logger.info("the gate gave no verdict on %s: %s", message.message_id, exc)
-            return None
+    async def _ask_the_gate(
+        self,
+        message: InboundMessage,
+        history: Sequence[Turn],
+        answer: type[DecisionT],
+        rubric: str,
+    ) -> DecisionT | None:
+        """Call B, however it is being asked, or `None` for stay quiet.
 
-        if decision.confidence < MIN_CONFIDENCE:
-            logger.info(
-                "the gate is only %.2f sure %s is %s; staying quiet",
-                decision.confidence,
-                message.message_id,
-                decision.topic,
-            )
-            return None
-        return decision
-
-    async def _eligible(self, message: InboundMessage, history: Sequence[Turn]) -> bool:
-        """Call B on an unaddressed message: is this clearly about AI?
-
-        The same gate, the same call type and the same confidence floor as tier
-        one, asked the narrower question tier two turns on. Everything that is
-        not a clear yes is a no, which is the common case and the cheap one.
+        One call, one call type and one confidence floor for both tiers: what
+        differs between them is the rubric and the shape of the answer, and a
+        gate that errored or hedged means the same thing either way.
         """
         try:
             decision = await self._brain.ask(
                 CallType.REPLY_GATE,
                 _gate_prompt(message, history),
-                ChimeInDecision,
-                instructions=CHATTER_RUBRIC,
+                answer,
+                instructions=rubric,
             )
         except BrainError as exc:
             logger.info("the gate gave no verdict on %s: %s", message.message_id, exc)
+            return None
+
+        if decision.confidence < MIN_CONFIDENCE:
+            logger.info(
+                "the gate is only %.2f sure about %s; staying quiet",
+                decision.confidence,
+                message.message_id,
+            )
+            return None
+        return decision
+
+    async def _classify(
+        self, message: InboundMessage, history: Sequence[Turn]
+    ) -> ReplyDecision | None:
+        """What kind of address this is: the tier-one question."""
+        return await self._ask_the_gate(message, history, ReplyDecision, RUBRIC)
+
+    async def _eligible(self, message: InboundMessage, history: Sequence[Turn]) -> bool:
+        """Is this a conversation she would speak up in: the tier-two question.
+
+        Narrower than tier one on both sides. It has to be clearly about AI, and
+        it has to be a subject she engages with at all: a no-go topic wrapped in
+        AI gets nothing here, where an addressed one would get a short "ni idea".
+        Nobody is left hanging by that silence, because nobody asked her.
+        """
+        decision = await self._ask_the_gate(message, history, ChimeInDecision, CHATTER_RUBRIC)
+        if decision is None:
             return False
 
         if not decision.about_ai:
             logger.debug("%s is not about AI; nothing to chime in on", message.message_id)
             return False
-        if decision.confidence < MIN_CONFIDENCE:
-            logger.info(
-                "the gate is only %.2f sure %s is about AI; staying quiet",
-                decision.confidence,
-                message.message_id,
-            )
+        if decision.no_go:
+            logger.info("%s is a topic she stays out of; not volunteering", message.message_id)
             return False
         return True
 
