@@ -156,7 +156,8 @@ All secrets are **Coolify per-app environment variables** (encrypted at rest, in
 
 ## 6. Pre-launch checklist (execution prerequisites)
 
-Planning-only spec; these are the builder's go-live steps, not done here:
+Planning-only spec; these are the builder's go-live steps, not done here.
+The first and fourth items were executed by [#14](https://github.com/ivzc07/bienwabot/issues/14) and recorded in [the bien-evo provisioning runbook](bien-evo-provisioning.md); the rest are executed by [#25](https://github.com/ivzc07/bienwabot/issues/25), step by step, in [the go-live runbook](go-live-runbook.md).
 
 - [ ] Create the `bien-evo` Evolution service on Coolify (v2.x, own PG16 + Redis7); join it to the shared internal network.
 - [ ] Create the `bien-rebe` instance; scan the QR to re-pair the primary number; set its per-instance webhook to the agent with the secret.
