@@ -78,12 +78,30 @@ jobs:
           grep -q 'evolution_instance=bien-rebe' boot.log
           grep -q 'timezone=America/Mexico_City' boot.log
       - name: Stay up, then stop cleanly on SIGTERM
+        # The wait is longer than the container needs on a healthy deployment: with
+        # no `rebe` database reachable here, boot spends a few seconds failing to
+        # read the soft-pause switch before the ops channel comes up - which it
+        # must do anyway, because an unreachable database is exactly when a
+        # maintainer needs to be told something.
         run: |
           id=$(docker run -d --env-file .env.ci rebe-agent:ci)
-          sleep 3
+          sleep 10
           test "$(docker inspect -f '{{.State.Running}}' "$id")" = "true"
           docker stop -t 15 "$id" > /dev/null
           docker logs "$id"
+          # All three of them, in one process: the webhook leg serving, the
+          # scheduler turning, and the ops channel listening. One image that
+          # boots two of the three is the failure this step exists to catch.
+          docker logs "$id" 2>&1 | grep -q 'serving the webhook leg on port 8000'
+          docker logs "$id" 2>&1 | grep -q 'scheduler leg up'
+          docker logs "$id" 2>&1 | grep -q 'ops control channel is listening'
+          # Both the Telegram bot token and the Kuma push token live in a URL
+          # *path*, so any logged line carrying one is a leaked credential - and
+          # httpx logs the URL of every request it makes at INFO by default.
+          if docker logs "$id" 2>&1 | grep -Eq 'api\.telegram\.org/bot.|/api/push/'; then
+            echo "a token-bearing URL reached the log"
+            exit 1
+          fi
           test "$(docker inspect -f '{{.State.ExitCode}}' "$id")" = "0"
           docker rm "$id" > /dev/null
       - name: Local time follows TZ
@@ -121,6 +139,32 @@ jobs:
             -c 'from rebe_agent.feeds import FEEDS; print("feeds", len(FEEDS), sorted(f.key for f in FEEDS)[0])' \
             | grep -q 'feeds 8 deepmind'
           docker run --rm --env-file .env.ci rebe-agent:ci --help | grep -q -- '--post-news'
+      # And the ops channel: it is the only thing that tells a human anything, so
+      # an image that lost it would fail silently by definition.
+      - name: The ops channel is in the image, with its heartbeat and its commands
+        run: |
+          docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
+            -c 'from rebe_agent.heartbeat import HEARTBEAT_SECONDS; from rebe_agent.ops import PAUSE_COMMANDS, RESUME_COMMANDS; print("ops", int(HEARTBEAT_SECONDS), sorted(PAUSE_COMMANDS)[0], sorted(RESUME_COMMANDS)[0])' \
+            | grep -q 'ops 60 pausa reanuda'
+
+      # And the webhook leg, which is what the container serves when it starts.
+      # The port is published to loopback for this step only: in production the
+      # agent has no published port and no public FQDN, and Evolution reaches it
+      # by container name over the internal network.
+      - name: The webhook leg serves, and only with the token
+        run: |
+          id=$(docker run -d -p 127.0.0.1:8000:8000 --env-file .env.ci rebe-agent:ci)
+          # Any HTTP answer means it is listening; -f is deliberately absent
+          # because the answer to this probe is a 405 and that is still "up".
+          for _ in $(seq 30); do
+            curl -s -o /dev/null http://127.0.0.1:8000/webhook/nope && break || sleep 1
+          done
+          code() { curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' -d '{}' "$1"; }
+          test "$(code http://127.0.0.1:8000/webhook/nope)" = "404"
+          test "$(code http://127.0.0.1:8000/webhook/ci-placeholder)" = "200"
+          docker logs "$id"
+          docker rm -f "$id" > /dev/null
       - name: Refuse to boot with a required variable missing
         run: |
           grep -v '^DEEPSEEK_API_KEY=' .env.ci > .env.broken

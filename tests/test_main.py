@@ -33,6 +33,22 @@ def test_the_startup_line_never_prints_a_secret(caplog: pytest.LogCaptureFixture
         assert secret not in logged
 
 
+def test_the_bot_token_never_reaches_the_log_through_httpx(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """httpx logs the URL of every request at INFO, and Telegram puts the bot
+    token in the URL path - so an INFO-level run would write that credential to
+    the log every time the ops channel polls for a command."""
+    main(["--check-config"], env=dict(COMPLETE_ENV))
+
+    logging.getLogger("httpx").info(
+        "HTTP Request: POST https://api.telegram.org/bot%s/getUpdates 200 OK",
+        COMPLETE_ENV["TELEGRAM_BOT_TOKEN"],
+    )
+
+    assert COMPLETE_ENV["TELEGRAM_BOT_TOKEN"] not in caplog.text
+
+
 def test_a_missing_variable_exits_non_zero_and_names_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

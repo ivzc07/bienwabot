@@ -71,15 +71,16 @@ class Settings(BaseModel):
     evolution_api_url: str = Field(alias="EVOLUTION_API_URL")
     evolution_api_key: SecretStr = Field(alias="EVOLUTION_API_KEY")
     evolution_instance: str = Field(default=DEFAULT_INSTANCE, alias="EVOLUTION_INSTANCE")
+    rebe_group_jid: str = Field(alias="REBE_GROUP_JID")
     webhook_secret: SecretStr = Field(alias="WEBHOOK_SECRET")
     rebe_database_url: SecretStr = Field(alias="REBE_DATABASE_URL")
     telegram_bot_token: SecretStr = Field(alias="TELEGRAM_BOT_TOKEN")
     telegram_chat_id: str = Field(alias="TELEGRAM_CHAT_ID")
-    kuma_push_url: str = Field(alias="KUMA_PUSH_URL")
+    kuma_push_url: SecretStr = Field(alias="KUMA_PUSH_URL")
     timezone: str = Field(default=DEFAULT_TIMEZONE, alias="TZ")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
-    @field_validator("evolution_api_url", "kuma_push_url", "deepseek_base_url")
+    @field_validator("evolution_api_url", "deepseek_base_url")
     @classmethod
     def _check_url(cls, value: str) -> str:
         return _absolute_url(value)
@@ -93,7 +94,15 @@ class Settings(BaseModel):
         )
         return value
 
-    @field_validator("evolution_instance", "telegram_chat_id")
+    @field_validator("kuma_push_url")
+    @classmethod
+    def _check_push_url(cls, value: SecretStr) -> SecretStr:
+        """A secret like the rest of them: the push token is *in* the URL, so
+        anybody holding it can keep the monitor green while Rebe is dead."""
+        _absolute_url(value.get_secret_value())
+        return value
+
+    @field_validator("evolution_instance", "rebe_group_jid", "telegram_chat_id")
     @classmethod
     def _check_not_blank(cls, value: str) -> str:
         stripped = value.strip()

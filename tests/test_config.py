@@ -18,6 +18,7 @@ COMPLETE_ENV = {
     "DEEPSEEK_API_KEY": "sk-deepseek-test",
     "EVOLUTION_API_URL": "http://bien-evo:8080",
     "EVOLUTION_API_KEY": "evo-key-test",
+    "REBE_GROUP_JID": "120363000000000000@g.us",
     "WEBHOOK_SECRET": "webhook-secret-test",
     "REBE_DATABASE_URL": "postgresql://rebe:pw@bien-evo-pg:5432/rebe",
     "TELEGRAM_BOT_TOKEN": "telegram-token-test",
@@ -40,11 +41,12 @@ def test_loads_every_required_variable(env: dict[str, str]) -> None:
     assert settings.deepseek_api_key.get_secret_value() == "sk-deepseek-test"
     assert settings.evolution_api_url == "http://bien-evo:8080"
     assert settings.evolution_api_key.get_secret_value() == "evo-key-test"
+    assert settings.rebe_group_jid == "120363000000000000@g.us"
     assert settings.webhook_secret.get_secret_value() == "webhook-secret-test"
     assert settings.rebe_database_url.get_secret_value().endswith("/rebe")
     assert settings.telegram_bot_token.get_secret_value() == "telegram-token-test"
     assert settings.telegram_chat_id == "-1001234567890"
-    assert settings.kuma_push_url == "http://kuma:3001/api/push/abc123"
+    assert settings.kuma_push_url.get_secret_value() == "http://kuma:3001/api/push/abc123"
 
 
 def test_optional_variables_have_spec_defaults(env: dict[str, str]) -> None:

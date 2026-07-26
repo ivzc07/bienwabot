@@ -27,6 +27,8 @@ import psycopg
 import pytest
 
 from rebe_agent.__main__ import EXIT_OK, EXIT_SEND_REFUSED, main
+from rebe_agent.clock import SystemClock
+from rebe_agent.pause import PostgresPauseSwitch
 from rebe_agent.sends import PostgresSendLog, fingerprint
 from tests.support import GROUP, MEXICO_CITY
 from tests.test_config import COMPLETE_ENV
@@ -88,6 +90,7 @@ def evolution() -> Iterator[StubEvolution]:
 @pytest.fixture
 def env(evolution: StubEvolution) -> dict[str, str]:
     _clear_the_send_log()
+    _clear_the_soft_pause()
     return dict(
         COMPLETE_ENV,
         REBE_DATABASE_URL=DATABASE_URL,
@@ -111,6 +114,20 @@ def _clear_the_send_log() -> None:
     asyncio.run(create_the_table())
     with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         conn.execute("DELETE FROM sends")
+
+
+def _clear_the_soft_pause() -> None:
+    """The command reads the ops channel's switch, so a pause left on by another
+    module's test would silence this one - which is the switch working, and a
+    confusing way to fail. Same shape as above: the switch owns its own DDL."""
+
+    async def create_the_table() -> None:
+        async with PostgresPauseSwitch.connect(DATABASE_URL, SystemClock(MEXICO_CITY)):
+            pass
+
+    asyncio.run(create_the_table())
+    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+        conn.execute("DELETE FROM soft_pause")
 
 
 def _recent_send(fingerprint_value: str) -> None:

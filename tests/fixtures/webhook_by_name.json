@@ -1,0 +1,25 @@
+{
+  "event": "messages.upsert",
+  "instance": "bien-rebe",
+  "data": {
+    "key": {
+      "remoteJid": "120363000000000000@g.us",
+      "fromMe": false,
+      "id": "3EB0A1B2C3D4E5F60002",
+      "participant": "5215559876543@s.whatsapp.net"
+    },
+    "pushName": "Ana",
+    "messageType": "conversation",
+    "message": {
+      "conversation": "Rebe, que opinas de los modelos que corren local?"
+    },
+    "messageTimestamp": 1785002400,
+    "instanceId": "b1a7f0f2-0000-4000-8000-000000000001",
+    "source": "ios"
+  },
+  "destination": "http://rebe-agent:8000/webhook/webhook-secret-test",
+  "date_time": "2026-07-25T12:00:00.000Z",
+  "sender": "5215551234567@s.whatsapp.net",
+  "server_url": "http://bien-evo:8080",
+  "apikey": "evo-key-test"
+}
