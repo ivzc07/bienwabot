@@ -2,10 +2,11 @@
 
 The whole path, in the order it happens:
 
-    remember the turn -> tier gate -> conversation shape -> classify -> mark read
-    -> generate -> validate -> send through the shared pacer -> remember hers
+    remember the turn -> tier gate -> soft pause -> conversation shape -> classify
+    -> mark read -> generate -> validate -> send through the shared pacer
+    -> remember hers
 
-Four of those steps are worth defending.
+Five of those steps are worth defending.
 
 **The turn is remembered first, before anything decides whether to answer.**
 Two reasons. A redelivered webhook is refused by that write, so the duplicate
@@ -30,6 +31,14 @@ messages in the group, ever.
 **The read receipt goes out once the gate has said yes, before generation.** That
 is the order section 3 of the deployment spec draws, and it is also the human
 one: she opened the message, and then either answered or got distracted.
+
+**The soft pause is read before the receipt, and before either model call.** A
+receipt with no answer behind it says she saw the message and chose not to reply,
+which is worse than silence and is not what an operator asking for quiet meant. A
+paused Rebe is a phone face down on a table: nothing read, nothing typed, nothing
+spent. The pacer still refuses the send on its own - this is an early out, not the
+guarantee - and it is read through the pacer so that there is only ever the one
+switch to wire.
 
 What the model writes is bounded here rather than only asked for in the prompt.
 A reply that carries a link, a figure, a second emoji, a deflection that steers
@@ -299,6 +308,10 @@ class ReplyLeg:
             logger.debug(
                 "%s in %s is tier %s; staying quiet", message.message_id, message.chat, where
             )
+            return None
+
+        if await self._pacer.paused():
+            logger.info("the soft pause is on; %s is not even read", message.message_id)
             return None
 
         thread = _thread(history, message.at)

@@ -230,17 +230,18 @@ async def test_a_paused_rebe_does_not_answer_even_when_addressed(
     """
     switch = InMemoryPauseSwitch(clock)
     await switch.set_paused(True, reason="cool it for a bit")
-    leg = make_leg(
-        settings, FakeDeepSeek(verdict(), wrote()), evolution, memory, clock, pause=switch
-    )
+    fake = FakeDeepSeek(verdict(), wrote())
+    leg = make_leg(settings, fake, evolution, memory, clock, pause=switch)
 
     assert await leg.handle(message("by_name")) is None
     assert evolution.texts == [], "a paused Rebe says nothing, addressed or not"
     assert "composing" not in evolution.shape, "nor does she look like she is about to"
-    # The blue ticks still land: the leg marks the message read before it asks the
-    # pacer for anything, and a pause is silence rather than absence. She is still
-    # in the group and still seeing it, which is exactly what a soft pause means.
-    assert evolution.shape == ["read"]
+    # Nor do the blue ticks land. A read receipt with no answer behind it is the
+    # one thing worse than silence: it says she saw the message and chose not to
+    # reply. A paused Rebe looks like a phone face down on a table.
+    assert evolution.shape == [], "a pause is put the phone down, not read and ignore"
+    assert evolution.reads == []
+    assert fake.requests == [], "and a message she will not answer is not worth a token"
 
 
 @pytest.mark.parametrize("name", ["mention", "by_name", "caption"])
