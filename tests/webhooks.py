@@ -26,6 +26,9 @@ BETO = "5215551112222@s.whatsapp.net"
 AT_EPOCH = 1_785_002_400
 """`messageTimestamp` on every recorded payload: 2026-07-25 12:00 in Mexico City."""
 
+CAPTIONED = ("imageMessage", "videoMessage", "documentMessage")
+"""Media whose readable words are a caption rather than a message body."""
+
 
 def payload(name: str) -> dict[str, Any]:
     """One recorded webhook body, as Evolution POSTs it."""
@@ -65,9 +68,18 @@ def edited(
 
 
 def _set_text(message: dict[str, Any], text: str) -> None:
+    """Put `text` wherever this kind of message keeps its readable words.
+
+    On a photo that is the caption, which is how "the same media, this time with
+    something to read" is written as one edit rather than a second fixture.
+    """
     if "conversation" in message:
         message["conversation"] = text
-    elif "extendedTextMessage" in message:
+        return
+    if "extendedTextMessage" in message:
         message["extendedTextMessage"]["text"] = text
-    else:
+        return
+    media = next((name for name in CAPTIONED if name in message), None)
+    if media is None:
         raise AssertionError(f"no text to edit in {sorted(message)}")
+    message[media]["caption"] = text

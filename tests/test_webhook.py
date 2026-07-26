@@ -15,6 +15,7 @@ import httpx
 import pytest
 
 from rebe_agent.brain import build_brain
+from rebe_agent.chimeins import ChimeInBudget, InMemoryChimeInLog
 from rebe_agent.clock import ManualClock, ManualSleeper
 from rebe_agent.config import Settings, load_settings
 from rebe_agent.evolution import EvolutionClient
@@ -75,6 +76,7 @@ def make_client(
         ),
         transport,
         memory,
+        ChimeInBudget(InMemoryChimeInLog(), clock, rng=random.Random(20260725)),
     )
     app = build_app(leg, SECRET)
     return httpx.AsyncClient(

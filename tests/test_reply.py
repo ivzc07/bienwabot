@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from rebe_agent.brain import Brain, build_brain
+from rebe_agent.chimeins import CHIME_INS_PER_DAY, COOLDOWN, ChimeInBudget, InMemoryChimeInLog
 from rebe_agent.clock import ManualClock, ManualSleeper
 from rebe_agent.config import Settings, load_settings
 from rebe_agent.evolution import EvolutionClient
@@ -42,7 +43,8 @@ from rebe_agent.sends import InMemorySendLog, SendKind
 from rebe_agent.usage import CallType, InMemoryUsageStore
 from tests.deepseek_stub import FakeDeepSeek, tool_call_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
-from tests.support import GROUP, NOON, RecordingAlerter
+from tests.support import GROUP, MEXICO_CITY, NOON, RecordingAlerter
+from tests.test_chimeins import Rolls
 from tests.test_config import COMPLETE_ENV
 from tests.webhooks import ANA, AT_EPOCH, BETO, edited, payload
 
@@ -54,9 +56,22 @@ that sends twice from arguing with a rule the news leg owns."""
 
 VOICE = "jaja no creo, mas bien te lo hace mas facil"
 
+CHIMED_IN = "pues a mi el nuevo se me hizo mas rapido que el anterior"
+
+YES = 0.0
+"""A draw below the chime-in probability: this eligible message becomes one."""
+
+NO = 0.99
+"""A draw above it, which is what most eligible messages get."""
+
 
 def verdict(topic: Topic | str = Topic.ON_TOPIC, confidence: float = 0.9) -> dict[str, Any]:
     return tool_call_response(json.dumps({"topic": str(topic), "confidence": confidence}))
+
+
+def about_ai(is_it: bool = True, confidence: float = 0.9) -> dict[str, Any]:
+    """The tier-two gate's verdict on a message nobody addressed to her."""
+    return tool_call_response(json.dumps({"about_ai": is_it, "confidence": confidence}))
 
 
 def wrote(text: str = VOICE) -> dict[str, Any]:
@@ -106,8 +121,13 @@ def make_leg(
     envelope: Envelope | None = None,
     brain: Brain | None = None,
     pause: Pause | None = None,
+    budget: ChimeInBudget | None = None,
 ) -> ReplyLeg:
-    """The real leg, against a fake DeepSeek and a fake Evolution."""
+    """The real leg, against a fake DeepSeek and a fake Evolution.
+
+    The chime-in budget defaults to one that never says yes, so a test about the
+    addressed tier is never surprised by an unprompted message it did not ask for.
+    """
     client = EvolutionClient(BASE_URL, API_KEY, INSTANCE, http_client=evolution.client())
     pacer = Pacer(
         client,
@@ -118,7 +138,25 @@ def make_leg(
         rng=random.Random(SEED),
         pause=pause,
     )
-    return ReplyLeg(brain or make_brain(settings, fake, clock), pacer, client, memory)
+    return ReplyLeg(
+        brain or make_brain(settings, fake, clock),
+        pacer,
+        client,
+        memory,
+        budget or make_budget(clock),
+    )
+
+
+def make_budget(
+    clock: ManualClock,
+    *draws: float,
+    chime_ins: InMemoryChimeInLog | None = None,
+    per_day: int = CHIME_INS_PER_DAY,
+) -> ChimeInBudget:
+    """A budget whose rolls a test names outright. No draws means she never does."""
+    return ChimeInBudget(
+        chime_ins or InMemoryChimeInLog(), clock, rng=Rolls(*draws), per_day=per_day
+    )
 
 
 # --- the reply the group sees -------------------------------------------------
@@ -550,25 +588,26 @@ async def test_a_read_receipt_that_fails_does_not_cost_the_reply(
     assert grumpy.texts == [VOICE]
 
 
-# --- the tiers this leg does not answer ---------------------------------------
+# --- the tier this leg never answers ------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "name", ["chatter", "small_talk", "sticker", "from_rebe", "direct_message"]
-)
-async def test_nothing_outside_tier_one_gets_a_reply(
+@pytest.mark.parametrize("name", ["sticker", "from_rebe", "direct_message"])
+async def test_the_silent_tier_gets_nothing_and_costs_nothing(
     name: str,
     settings: Settings,
     evolution: FakeEvolution,
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    fake = FakeDeepSeek(verdict(), wrote())
-    leg = make_leg(settings, fake, evolution, memory, clock)
+    """Her own echo, a private chat, and a sticker with no words in it. None of
+    them is a message a person would answer, and none of them reaches the gate:
+    there is nothing there to classify."""
+    fake = FakeDeepSeek(about_ai(), wrote())
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
 
     assert await leg.handle(message(name)) is None
     assert evolution.calls == []
-    assert fake.requests == [], "an unaddressed message never costs a token"
+    assert fake.requests == [], "a message with nothing readable in it costs no token"
 
 
 async def test_unaddressed_chatter_is_still_remembered(
@@ -579,13 +618,427 @@ async def test_unaddressed_chatter_is_still_remembered(
 ) -> None:
     """She is quiet, not absent: the turn is in the window so the next reply has
     the thread behind it."""
-    leg = make_leg(settings, FakeDeepSeek(verdict(), wrote()), evolution, memory, clock)
+    leg = make_leg(settings, FakeDeepSeek(about_ai(False)), evolution, memory, clock)
 
     await leg.handle(message("chatter"))
 
     assert [turn.text for turn in await memory.recent(GROUP)] == [
         "oigan ya probaron el modelo nuevo de openai?"
     ]
+
+
+# --- tier two: the unprompted chime-in ----------------------------------------
+
+
+async def test_an_unaddressed_ai_message_can_become_a_chime_in(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """The headline acceptance criterion of this tier: nobody asked her, the
+    group is talking about AI, and she joins in - paced like everything else."""
+    fake = FakeDeepSeek(about_ai(), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    sent = await leg.handle(message("chatter"))
+
+    assert sent is not None
+    assert evolution.texts == [CHIMED_IN]
+    assert evolution.shape == ["read", "composing", "text", "paused"]
+    assert sent.typing_seconds > 0
+
+
+async def test_a_chime_in_goes_out_through_the_shared_pacer(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """Not a second send path: it is written to the same log the news posts and
+    the addressed replies are counted from."""
+    log = InMemorySendLog()
+    leg = make_leg(
+        settings,
+        FakeDeepSeek(about_ai(), wrote(CHIMED_IN)),
+        evolution,
+        memory,
+        clock,
+        log=log,
+        budget=make_budget(clock, YES),
+    )
+
+    await leg.handle(message("chatter"))
+
+    latest = await log.latest()
+    assert latest is not None
+    assert latest.kind is SendKind.REPLY
+    assert latest.chat == GROUP
+
+
+async def test_a_chime_in_is_written_as_one_of_hers(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    leg = make_leg(
+        settings,
+        FakeDeepSeek(about_ai(), wrote(CHIMED_IN)),
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, YES),
+    )
+
+    await leg.handle(message("chatter"))
+
+    window = list(await memory.recent(GROUP))
+    assert [turn.by_rebe for turn in window] == [False, True]
+    assert window[-1].text == CHIMED_IN
+
+
+@pytest.mark.parametrize("name", ["chatter", "small_talk"])
+async def test_talk_that_is_not_about_ai_produces_no_message_at_all(
+    name: str,
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """Ordinary chatter, and tech talk the gate does not call AI. The scope is
+    narrow on purpose: "not all of tech"."""
+    fake = FakeDeepSeek(about_ai(False), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    assert await leg.handle(message(name)) is None
+    assert evolution.calls == [], "not even a read receipt on a message she skipped"
+
+
+async def test_every_inbound_message_still_reaches_the_gate(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """No keyword pre-filter in front of the model. Football talk has none of the
+    words a regex would look for, and it costs a gate call anyway - because the
+    same regex would have swallowed "el modelo nuevo de Anthropic"."""
+    fake = FakeDeepSeek(about_ai(False))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    await leg.handle(message("small_talk"))
+
+    assert len(fake.requests) == 1, "the gate judged it, nothing cheaper did"
+    assert "alguien va al partido el sabado?" in json.dumps(fake.requests[0])
+
+
+async def test_most_eligible_messages_get_nothing(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """The roll is what makes her selective rather than a lurker. The rate itself
+    is asserted over two thousand draws in `tests/test_chimeins.py`; what this
+    proves is that the leg is wired to it."""
+    fake = FakeDeepSeek(about_ai(), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, NO))
+
+    assert await leg.handle(message("chatter")) is None
+    assert evolution.calls == []
+    assert len(fake.requests) == 1, "a message she will not send is not worth a second call"
+
+
+async def test_a_gate_that_is_unsure_leaves_the_conversation_alone(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    leg = make_leg(
+        settings,
+        FakeDeepSeek(about_ai(confidence=0.3), wrote(CHIMED_IN)),
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, YES),
+    )
+
+    assert await leg.handle(message("chatter")) is None
+    assert evolution.texts == []
+
+
+async def test_a_broken_gate_is_silence_here_too(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    leg = make_leg(
+        settings, FakeDeepSeek(500), evolution, memory, clock, budget=make_budget(clock, YES)
+    )
+
+    assert await leg.handle(message("chatter")) is None
+    assert evolution.texts == []
+
+
+async def test_a_paused_rebe_does_not_chime_in_either(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """The twin of the addressed-tier pause test, and for the same reason: the
+    switch has to reach every tier, and a tier wired past it would go on talking
+    quietly while an operator believed Rebe was silent."""
+    switch = InMemoryPauseSwitch(clock)
+    await switch.set_paused(True, reason="cool it for a bit")
+    fake = FakeDeepSeek(about_ai(), wrote(CHIMED_IN))
+    leg = make_leg(
+        settings,
+        fake,
+        evolution,
+        memory,
+        clock,
+        pause=switch,
+        budget=make_budget(clock, YES),
+    )
+
+    assert await leg.handle(message("chatter")) is None
+    assert evolution.shape == [], "a pause is put the phone down, not read and ignore"
+    assert fake.requests == [], "and a message she will not answer is not worth a token"
+
+
+async def test_the_daily_ceiling_stops_her_whatever_the_roll_says(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """Every roll here says yes and the cooldown is stepped over, so the only
+    thing left to stop the last one is the ceiling."""
+    fake = _a_different_chime_in_each_time(CHIME_INS_PER_DAY + 1)
+    leg = make_leg(
+        settings,
+        fake,
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, *[YES] * (CHIME_INS_PER_DAY + 1)),
+    )
+
+    for turn in range(CHIME_INS_PER_DAY + 1):
+        clock.advance(COOLDOWN)
+        await leg.handle(_another_ai_message(turn))
+
+    assert len(evolution.texts) == CHIME_INS_PER_DAY
+
+
+async def test_two_chime_ins_never_land_back_to_back(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """The day is nowhere near full; they are simply too close together."""
+    leg = make_leg(
+        settings,
+        _a_different_chime_in_each_time(2),
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, YES, YES),
+    )
+
+    await leg.handle(_another_ai_message(0))
+    clock.advance(COOLDOWN - timedelta(minutes=5))
+    second = await leg.handle(_another_ai_message(1))
+
+    assert second is None
+    assert len(evolution.texts) == 1
+
+
+async def test_an_addressed_reply_still_goes_out_after_the_ceiling(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """The two budgets are separate. A day full of chime-ins must never be the
+    reason a name-tag goes unanswered - tier one has no cap at all."""
+    chime_ins = InMemoryChimeInLog()
+    fake = FakeDeepSeek(about_ai(), verdict(), wrote())
+    leg = make_leg(
+        settings,
+        fake,
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, YES, chime_ins=chime_ins, per_day=0),
+    )
+
+    assert await leg.handle(message("chatter")) is None
+    assert await leg.handle(message("by_name")) is not None
+    assert evolution.texts == [VOICE]
+
+
+async def test_the_days_count_outlives_the_leg_that_made_it(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """A restart is not a fresh allowance: the count is in the store, not in the
+    process. This is the same store handed to a second leg built from scratch."""
+    chime_ins = InMemoryChimeInLog()
+    before = make_leg(
+        settings,
+        _a_different_chime_in_each_time(CHIME_INS_PER_DAY),
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, *[YES] * CHIME_INS_PER_DAY, chime_ins=chime_ins),
+    )
+    for turn in range(CHIME_INS_PER_DAY):
+        clock.advance(COOLDOWN)
+        await before.handle(_another_ai_message(turn))
+
+    after_restart = make_leg(
+        settings,
+        _a_different_chime_in_each_time(1),
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, YES, chime_ins=chime_ins),
+    )
+    clock.advance(COOLDOWN)
+
+    assert await after_restart.handle(_another_ai_message(9)) is None
+    assert len(evolution.texts) == CHIME_INS_PER_DAY
+
+
+async def test_the_day_that_is_full_is_the_local_one(
+    settings: Settings, evolution: FakeEvolution, memory: InMemoryGroupMemory
+) -> None:
+    """Noon in Mexico City is already 18:00 UTC. A count kept in UTC would hand
+    her a fresh allowance in the middle of the evening."""
+    clock = ManualClock(NOON, MEXICO_CITY)
+    chime_ins = InMemoryChimeInLog()
+    leg = make_leg(
+        settings,
+        _a_different_chime_in_each_time(CHIME_INS_PER_DAY + 1),
+        evolution,
+        memory,
+        clock,
+        budget=make_budget(clock, *[YES] * (CHIME_INS_PER_DAY + 1), chime_ins=chime_ins),
+        envelope=Envelope(
+            sends_per_hour=99, sends_per_day=99, post_gap=(timedelta(0), timedelta(0))
+        ),
+    )
+    for turn in range(CHIME_INS_PER_DAY):
+        clock.advance(COOLDOWN)
+        await leg.handle(_another_ai_message(turn))
+
+    clock.advance(timedelta(hours=3))
+
+    assert await leg.handle(_another_ai_message(8)) is None, "19:30 local is still today"
+    assert len(evolution.texts) == CHIME_INS_PER_DAY
+
+
+async def test_a_media_only_message_produces_silence(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """A photo with no caption. She does not guess at what a picture said."""
+    fake = FakeDeepSeek(about_ai(), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    assert await leg.handle(message("photo")) is None
+    assert evolution.calls == []
+    assert fake.requests == []
+
+
+async def test_the_same_photo_with_a_caption_is_answered_on_the_caption(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """ "If readable text accompanies the media she responds to the text." """
+    caption = "miren la grafica del modelo nuevo de openai"
+    fake = FakeDeepSeek(about_ai(), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    assert await leg.handle(message("photo", text=caption)) is not None
+    assert evolution.texts == [CHIMED_IN]
+    assert caption in json.dumps(fake.requests[0]), "the caption is what the gate judged"
+
+
+async def test_an_english_message_is_answered_in_spanish(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """She understands English and answers in her own voice anyway: switching
+    language on command is a tell, and the instruction that says so is what the
+    model is actually handed."""
+    fake = FakeDeepSeek(about_ai(), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    await leg.handle(message("chatter", text="anyone tried the new openai model yet?"))
+
+    assert evolution.texts == [CHIMED_IN]
+    written = _instructions(fake.requests[-1])
+    assert "Siempre en español, aunque te escriban en inglés" in written
+
+
+async def test_a_chime_in_is_told_that_nobody_asked_her(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """The generation call is given the situation, not only the topic. A model
+    told "answer this" writes an answer, and an answer to a question nobody asked
+    is the shape a helpdesk has."""
+    fake = FakeDeepSeek(about_ai(), wrote(CHIMED_IN))
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=make_budget(clock, YES))
+
+    await leg.handle(message("chatter"))
+
+    written = _instructions(fake.requests[-1])
+    assert "Nadie te habló a ti" in written
+    assert "Alguien te habló directo" not in written
+
+
+def _another_ai_message(turn: int) -> InboundMessage:
+    """A fresh unaddressed message about AI, far enough from the last to be its
+    own thread rather than a continuation of one she has already spoken in."""
+    return message(
+        "chatter",
+        text=f"y ya vieron el otro modelo, el numero {turn}",
+        message_id=f"3EB0CHIME{turn}",
+        at_epoch=AT_EPOCH + 7_200 * (turn + 1),
+    )
+
+
+def _a_different_chime_in_each_time(turns: int) -> FakeDeepSeek:
+    """An eligibility verdict and a *distinct* chime-in for each of `turns` events.
+
+    Distinct because the pacer refuses identical wording twice in a row, and a
+    test about the day's ceiling should not trip over a rule the envelope owns.
+    """
+    return FakeDeepSeek(
+        *(
+            response
+            for turn in range(turns)
+            for response in (about_ai(), wrote(f"a mi ese se me hizo mejor, el {turn}"))
+        )
+    )
 
 
 # --- conversation shape -------------------------------------------------------
