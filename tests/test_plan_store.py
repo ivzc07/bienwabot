@@ -16,6 +16,7 @@ import psycopg
 import pytest
 
 from rebe_agent.cadence import DayPlan, Slot, SlotState, moment_on
+from rebe_agent.db import open_pool
 from rebe_agent.plans import PostgresPlanStore
 from rebe_agent.tiers import Tier
 from tests.support import MEXICO_CITY
@@ -192,3 +193,25 @@ async def test_the_stored_datetime_is_the_instant_not_the_wall_clock(
     stored = await store.plan_on(WEDNESDAY)
     assert stored is not None
     assert stored.slots[0].at == datetime(2026, 7, 29, 9, 14, tzinfo=MEXICO_CITY)
+
+
+async def test_a_store_whose_table_was_never_prepared_reads_through_on_first_use(
+    store: PostgresPlanStore,
+) -> None:
+    """The first deploy onto an empty `rebe` database crash-looped on this.
+
+    Boot prepares the schema beside the server rather than before it, so that a
+    Postgres a few seconds behind the container does not stop the process coming
+    up. But the scheduler's first act is to read the day's plan, and that read
+    raced the `CREATE TABLE` and lost: an `UndefinedTable` out of the store ends
+    the scheduler, and a scheduler that ends takes the process with it.
+    """
+    async with open_pool(DATABASE_URL) as pool:
+        # A bare store rather than `connect`, which would prepare the table for
+        # it: what is under test is the first read making its own table.
+        never_prepared = PostgresPlanStore(pool, MEXICO_CITY)
+
+        assert await never_prepared.plan_on(WEDNESDAY) is None
+        assert (await never_prepared.register(PLAN)).day == WEDNESDAY
+
+    assert await store.plan_on(WEDNESDAY) is not None
