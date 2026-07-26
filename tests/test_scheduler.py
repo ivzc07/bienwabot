@@ -219,6 +219,7 @@ async def test_a_roll_that_runs_late_keeps_only_what_is_still_ahead_of_it(
     assert plan is not None
     assert [s.window for s in plan.slots] == ["evening", "late"]
     assert all(s.at > at(time(16, 0)) for s in plan.slots)
+    assert "already past" in caplog.text
 
 
 # --- one slot coming due -----------------------------------------------------
@@ -358,6 +359,60 @@ async def test_a_conversation_that_keeps_going_eventually_drops_the_slot(
     assert plan is not None
     assert plan.slots[0].state is SlotState.DROPPED
     assert leg.calls == []
+
+
+async def test_the_deferral_is_drawn_once_per_message_not_once_per_wait(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """A delay redrawn on every pass of the loop would be the *maximum* of its
+    draws, because a longer draw always pushes the answer out again - so "ten to
+    twenty minutes" would settle near twenty. One draw per message, one wait."""
+    await plans.register(DayPlan(day=WEDNESDAY, slots=(slot(time(9, 14)),)))
+    await seed_send(sends, at(time(9, 13)))
+    clock = ManualClock(at(time(9, 14)))
+    scheduler, sleeper = make_scheduler(StubLeg(), clock, plans, sends)
+
+    await scheduler.step()
+
+    assert len(sleeper.slept) == 1
+
+
+async def test_a_late_slot_is_never_deferred_into_the_overnight_hold(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """The 30 minutes of grace stop at 23:00, where the anti-ban hold starts. The
+    pacer would refuse the send anyway; dropping it here means the day does not
+    pay DeepSeek to write a post that was never going out."""
+    await plans.register(
+        DayPlan(day=WEDNESDAY, slots=(slot(time(22, 50), window="late", closes=time(23, 0)),))
+    )
+    await seed_send(sends, at(time(22, 55)))
+    clock = ManualClock(at(time(22, 56)))
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends)
+
+    await scheduler.step()
+
+    plan = await plans.plan_on(WEDNESDAY)
+    assert plan is not None
+    assert plan.slots[0].state is SlotState.DROPPED
+    assert leg.calls == []
+
+
+async def test_a_late_slot_inside_its_own_window_still_posts(
+    plans: InMemoryPlanStore, sends: InMemorySendLog
+) -> None:
+    """The cap is on the grace, not on the window: 22:59 is a time Rebe posts at."""
+    await plans.register(
+        DayPlan(day=WEDNESDAY, slots=(slot(time(22, 59), window="late", closes=time(23, 0)),))
+    )
+    clock = ManualClock(at(time(22, 59)))
+    leg = StubLeg()
+    scheduler, _ = make_scheduler(leg, clock, plans, sends)
+
+    await scheduler.step()
+
+    assert leg.calls == [(GROUP, 1)]
 
 
 async def test_a_message_from_long_before_the_slot_defers_nothing(

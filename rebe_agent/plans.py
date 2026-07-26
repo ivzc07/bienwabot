@@ -19,13 +19,15 @@ The three promises this store makes, all of them for the restart case:
   session's zone, and every window edge, log line and quiet-hour decision
   downstream is a statement about Mexico City.
 
-The state lives in a column rather than in the `Slot` the scheduler holds, so the
-one place that can disagree with the database is not held in a variable.
+A `Slot` carries the state it was read with, and nothing edits it in place: the
+loop settles a slot by naming it - the day and the window - and reads it back.
+So the store is the only thing that says what a slot's state is, and a stale copy
+in a variable cannot outvote it.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import date, datetime, tzinfo
 from typing import Protocol
@@ -58,20 +60,34 @@ class InMemoryPlanStore:
         self._days: dict[date, list[Slot]] = {}
 
     async def register(self, plan: DayPlan) -> DayPlan:
-        stored = self._days.setdefault(plan.day, list(plan.slots))
-        return DayPlan(day=plan.day, slots=tuple(stored))
+        if not plan.slots:
+            # Rows are what make a day rolled, so registering nothing rolls
+            # nothing - the same as the insert below doing nothing.
+            return await self.plan_on(plan.day) or plan
+        # Per window rather than per day, so this keeps the same promise the
+        # unique index below does: a window already registered keeps its time,
+        # and one that is new is added.
+        stored = self._days.setdefault(plan.day, [])
+        known = {slot.window for slot in stored}
+        stored.extend(slot for slot in plan.slots if slot.window not in known)
+        return _in_order(plan.day, stored)
 
     async def plan_on(self, day: date) -> DayPlan | None:
         slots = self._days.get(day)
         if slots is None:
             return None
-        return DayPlan(day=day, slots=tuple(slots))
+        return _in_order(day, slots)
 
     async def settle(self, day: date, window: str, state: SlotState) -> None:
         slots = self._days.get(day, [])
         for index, slot in enumerate(slots):
             if slot.window == window:
                 slots[index] = Slot(window=slot.window, at=slot.at, closes=slot.closes, state=state)
+
+
+def _in_order(day: date, slots: Iterable[Slot]) -> DayPlan:
+    """A day's slots earliest first, which is the order the real store reads in."""
+    return DayPlan(day=day, slots=tuple(sorted(slots, key=lambda slot: slot.at)))
 
 
 SCHEMA = """
@@ -91,7 +107,10 @@ INDEXES = (
     "CREATE UNIQUE INDEX IF NOT EXISTS planned_slots_day_idx ON planned_slots (day, window_name)",
 )
 
-COLUMNS = "day, window_name, due_at, closes_at, state"
+SLOT_COLUMNS = "window_name, due_at, closes_at, state"
+"""Everything a `Slot` is made of. The day is the key, so it is read separately."""
+
+COLUMNS = f"day, {SLOT_COLUMNS}"
 
 
 class PostgresPlanStore:
@@ -129,8 +148,7 @@ class PostgresPlanStore:
     async def plan_on(self, day: date) -> DayPlan | None:
         async with self._pool.connection() as conn:
             cursor = await conn.execute(
-                "SELECT window_name, due_at, closes_at, state FROM planned_slots "
-                "WHERE day = %s ORDER BY due_at",
+                f"SELECT {SLOT_COLUMNS} FROM planned_slots WHERE day = %s ORDER BY due_at",
                 (day,),
             )
             rows = await cursor.fetchall()

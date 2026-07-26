@@ -83,13 +83,16 @@ def test_a_weekend_drops_the_morning_window_and_shifts_the_rest_later(day: date)
 
 @pytest.mark.parametrize("window", WEEKDAY_WINDOWS + WEEKEND_WINDOWS, ids=lambda w: str(w))
 def test_a_drawn_time_never_falls_outside_its_window(window: PostWindow) -> None:
+    """The window is half-open, like the pacer's: the closing minute itself is
+    already the next thing. It matters at 23:00, where the overnight hold starts
+    and a post drawn on that second would be written and then refused."""
     rng = random.Random(SEED)
     opens = moment_on(WEDNESDAY, window.opens, MEXICO_CITY)
     closes = moment_on(WEDNESDAY, window.closes, MEXICO_CITY)
 
     drawn = [roll(WEDNESDAY, rng, only(window))[0] for _ in range(DAYS)]
 
-    assert all(opens <= at <= closes for at in drawn)
+    assert all(opens <= at < closes for at in drawn)
 
 
 @pytest.mark.parametrize("window", WEEKDAY_WINDOWS + WEEKEND_WINDOWS, ids=lambda w: str(w))
@@ -145,7 +148,21 @@ def test_nothing_is_ever_drawn_between_eleven_at_night_and_eight_in_the_morning(
 
     for _ in range(DAYS):
         for at in roll(day, rng):
-            assert WAKING_OPENS <= at.time() <= WAKING_CLOSES
+            assert WAKING_OPENS <= at.time() < WAKING_CLOSES
+
+
+def test_the_late_window_never_draws_the_stroke_of_eleven() -> None:
+    """The one boundary that costs something: the pacer holds every post from
+    23:00:00, so a slot drawn on that second would be summarised by DeepSeek and
+    then refused. Forced by drawing the tail two thousand times over."""
+    late = WEEKDAY_WINDOWS[-1]
+    rng = random.Random(SEED)
+    edge = moment_on(WEDNESDAY, WAKING_CLOSES, MEXICO_CITY)
+
+    drawn = [roll(WEDNESDAY, rng, only(late))[0] for _ in range(2000)]
+
+    assert max(drawn) < edge
+    assert max(drawn) >= edge - timedelta(minutes=1), "the edge is still reachable"
 
 
 def test_a_window_that_reaches_into_the_night_is_refused() -> None:
@@ -241,7 +258,21 @@ def test_a_slot_knows_the_edge_it_must_not_drift_far_past() -> None:
 
     morning = plan.slots[0]
     assert morning.closes == moment_on(WEDNESDAY, time(10, 30), MEXICO_CITY)
-    assert morning.at <= morning.closes
+    assert morning.at < morning.closes
+
+
+def test_a_slot_may_run_half_an_hour_past_its_window_but_never_past_bedtime() -> None:
+    """Section 5's grace and section 2's overnight hold disagree about the late
+    window, and the hold wins: 23:30 is not a time Rebe posts at."""
+    cadence = Cadence()
+    plan = draw_plan(WEDNESDAY, zone=MEXICO_CITY, rng=random.Random(SEED), cadence=cadence)
+    by_window = {slot.window: slot for slot in plan.slots}
+
+    evening = cadence.deadline_for(by_window["evening"], MEXICO_CITY)
+    late = cadence.deadline_for(by_window["late"], MEXICO_CITY)
+
+    assert evening == moment_on(WEDNESDAY, time(20, 30), MEXICO_CITY)
+    assert late == moment_on(WEDNESDAY, WAKING_CLOSES, MEXICO_CITY)
 
 
 def test_a_freshly_drawn_slot_is_still_waiting_to_happen() -> None:

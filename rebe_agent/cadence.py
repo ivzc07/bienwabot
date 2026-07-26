@@ -51,6 +51,9 @@ band of 02:00-06:00, because sleep is the strongest human signal available."""
 SIGMA_DIVISOR = 5.0
 """`sigma = window_width / 5`, from section 3 step 2."""
 
+RESOLUTION = timedelta(seconds=1)
+"""The grain a time is drawn to, and the width of a window's closing edge."""
+
 
 @dataclass(frozen=True, slots=True)
 class PostWindow:
@@ -174,9 +177,6 @@ class Cadence:
     grace: timedelta = timedelta(minutes=30)
     """How far past its window edge a deferred post may still go out."""
 
-    sigma_divisor: float = SIGMA_DIVISOR
-    """The window width is divided by this to get the Gaussian's sigma."""
-
     def __post_init__(self) -> None:
         for windows in (self.weekday, self.weekend):
             names = [window.name for window in windows]
@@ -191,10 +191,38 @@ class Cadence:
         """The window set that day belongs to."""
         return self.weekend if day.weekday() >= SATURDAY else self.weekday
 
+    def deadline_for(self, slot: Slot, zone: tzinfo) -> datetime:
+        """The first moment a slot is too late to post, so it is dropped instead.
+
+        Section 5 gives a deferred post about thirty minutes past its window edge.
+        Section 2 says nothing goes out after 23:00 at all, and that outranks the
+        grace: the late window's grace would otherwise run to 23:30, where the
+        pacer holds every post anyway. Capping it here rather than learning it
+        from a refusal is what stops the day paying DeepSeek to write a post that
+        was never going to be allowed out.
+        """
+        quiet = moment_on(slot.closes.astimezone(zone).date(), WAKING_CLOSES, zone)
+        return min(slot.closes + self.grace, quiet)
+
 
 def moment_on(day: date, moment: time, zone: tzinfo) -> datetime:
     """A wall-clock time on a given day, in the agent's zone."""
     return datetime.combine(day, moment, tzinfo=zone)
+
+
+def spread(low: timedelta, high: timedelta, fraction: float) -> timedelta:
+    """The point `fraction` of the way from `low` to `high`."""
+    return low + (high - low) * fraction
+
+
+def minutes(span: timedelta) -> str:
+    """A duration a human reads at a glance, for a log line."""
+    total = span.total_seconds()
+    if total < 90:
+        return f"{total:.0f}s"
+    if total < 5400:
+        return f"{total / 60:.0f}m"
+    return f"{total / 3600:.1f}h"
 
 
 def jittered_gap(rng: random.Random, cadence: Cadence) -> timedelta:
@@ -206,8 +234,7 @@ def jittered_gap(rng: random.Random, cadence: Cadence) -> timedelta:
     jitter existed to remove - the same argument the pacer makes about a caller
     that retries.
     """
-    low, high = cadence.gap
-    return low + (high - low) * rng.random()
+    return spread(*cadence.gap, rng.random())
 
 
 def draw_plan(
@@ -224,7 +251,7 @@ def draw_plan(
     for window in cadence.windows_for(day):
         opens = moment_on(day, window.opens, zone)
         closes = moment_on(day, window.closes, zone)
-        at = _draw_inside(opens, closes, window.span, rng, cadence.sigma_divisor)
+        at = _draw_inside(opens, closes, window.span, rng)
 
         if slots:
             required = jittered_gap(rng, cadence)
@@ -232,14 +259,14 @@ def draw_plan(
             for _ in range(cadence.gap_attempts):
                 if at - previous >= required:
                     break
-                at = _draw_inside(opens, closes, window.span, rng, cadence.sigma_divisor)
+                at = _draw_inside(opens, closes, window.span, rng)
             if at - previous < required:
                 logger.info(
                     "dropping the %s slot on %s: nothing in %s clears %s after %s",
                     window.name,
                     day.isoformat(),
                     window,
-                    _minutes(required),
+                    minutes(required),
                     previous.strftime("%H:%M"),
                 )
                 continue
@@ -256,24 +283,25 @@ def draw_plan(
 
 
 def _draw_inside(
-    opens: datetime, closes: datetime, span: timedelta, rng: random.Random, divisor: float
+    opens: datetime, closes: datetime, span: timedelta, rng: random.Random
 ) -> datetime:
-    """One Gaussian draw around the window's midpoint, clipped to its edges.
+    """One Gaussian draw around the window's midpoint, clipped inside its edges.
 
-    Clipped rather than folded back in, which is what section 3 asks for: at
-    two and a half sigma the tails are thin enough that piling them onto an edge
-    is not a rhythm anybody could see, and an edge is a legitimate time to post.
+    Clipped rather than folded back in, which is what section 3 asks for: at two
+    and a half sigma the tails are thin enough that piling them onto an edge is
+    not a rhythm anybody could see, and an edge is a legitimate time to post.
+
+    The window is half-open, like the pacer's: the last drawable moment is one
+    `RESOLUTION` before it closes. That matters at exactly one edge and it is the
+    one that counts - a late window closing at 23:00 must not draw 23:00 itself,
+    because the overnight hold starts on that second and the pacer would refuse
+    the post after the day had already paid DeepSeek to write it.
     """
     middle = opens + span / 2
-    sigma = span.total_seconds() / divisor
+    sigma = span.total_seconds() / SIGMA_DIVISOR
     drawn = middle + timedelta(seconds=round(rng.gauss(0.0, sigma)))
-    return min(max(drawn, opens), closes)
+    return min(max(drawn, opens), closes - RESOLUTION)
 
 
 def _since_midnight(moment: time) -> timedelta:
     return timedelta(hours=moment.hour, minutes=moment.minute, seconds=moment.second)
-
-
-def _minutes(span: timedelta) -> str:
-    """A duration a human reads at a glance, for a log line."""
-    return f"{span.total_seconds() / 60:.0f}m"

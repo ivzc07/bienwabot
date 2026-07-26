@@ -38,7 +38,17 @@ from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from typing import Protocol
 
-from rebe_agent.cadence import DAWN, Cadence, DayPlan, Slot, SlotState, draw_plan, moment_on
+from rebe_agent.cadence import (
+    DAWN,
+    Cadence,
+    DayPlan,
+    Slot,
+    SlotState,
+    draw_plan,
+    minutes,
+    moment_on,
+    spread,
+)
 from rebe_agent.clock import Clock, RealSleeper, Sleeper
 from rebe_agent.evolution import EvolutionError
 from rebe_agent.news import Posted
@@ -142,7 +152,7 @@ class Scheduler:
             logger.info(
                 "the roll for %s ran %s late; %d drawn time(s) were already past",
                 day.isoformat(),
-                _minutes(now - self._dawn_on(day)),
+                minutes(now - self._dawn_on(day)),
                 missed,
             )
 
@@ -161,10 +171,12 @@ class Scheduler:
 
     async def _fire(self, day: date, slot: Slot) -> None:
         """One slot, from due to settled: defer, drop, or post exactly once."""
-        deadline = slot.closes + self._cadence.grace
+        deadline = self._cadence.deadline_for(slot, self._clock.zone)
+        # One deferral per message she sent, remembered across the waits below.
+        drawn: dict[datetime, timedelta] = {}
         while True:
             now = self._clock.now()
-            if now > deadline:
+            if now >= deadline:
                 await self._drop(
                     day,
                     slot,
@@ -172,16 +184,15 @@ class Scheduler:
                 )
                 return
 
-            resume = await self._deferred_until(now)
+            resume = await self._deferred_until(now, drawn)
             if resume is None:
                 break
-            if resume > deadline:
+            if resume >= deadline:
                 await self._drop(
                     day,
                     slot,
-                    f"Rebe is mid-conversation until {resume:%H:%M}, past the "
-                    f"{_minutes(self._cadence.grace)} of grace on a "
-                    f"{slot.closes:%H:%M} window",
+                    f"Rebe is mid-conversation until {resume:%H:%M}, past what a "
+                    f"{slot.closes:%H:%M} window can be stretched to",
                 )
                 return
             logger.info(
@@ -220,23 +231,29 @@ class Scheduler:
         )
         await self._plans.settle(day, slot.window, SlotState.POSTED)
 
-    async def _deferred_until(self, now: datetime) -> datetime | None:
+    async def _deferred_until(
+        self, now: datetime, drawn: dict[datetime, timedelta]
+    ) -> datetime | None:
         """When a post may follow her last message, or `None` if it may go now.
 
         Her last message of *any* kind, post or reply, per section 5: what looks
         like two programs is a link landing on top of a conversation, and the
         conversation is whichever leg was talking.
 
-        The delay is drawn fresh each time this is asked rather than fixed per
-        message. Unlike the pacer's thresholds there is no caller retrying against
-        it - the only way to ask twice is to have slept through the first answer -
-        so a fresh draw cannot be mined for its minimum.
+        One draw per message, remembered in `drawn`, and a fresh one only when she
+        has said something new - which is the same discipline the pacer keeps for
+        the opposite reason. Redrawing on every pass would hand the wait the
+        *maximum* of its draws, since a longer draw always pushes the answer out
+        again, and "ten to twenty minutes" would settle near twenty.
         """
         last = await self._sends.latest()
         if last is None:
             return None
-        low, high = self._cadence.defer
-        resume = last.sent_at + low + (high - low) * self._rng.random()
+        delay = drawn.get(last.sent_at)
+        if delay is None:
+            delay = spread(*self._cadence.defer, self._rng.random())
+            drawn[last.sent_at] = delay
+        resume = last.sent_at + delay
         return resume if resume > now else None
 
     async def _drop(self, day: date, slot: Slot, why: str) -> None:
@@ -247,7 +264,7 @@ class Scheduler:
         seconds = (target - self._clock.now()).total_seconds()
         if seconds <= 0:
             return
-        logger.debug("waiting %s for %s", _minutes(timedelta(seconds=seconds)), what)
+        logger.debug("waiting %s for %s", minutes(timedelta(seconds=seconds)), what)
         await self._sleeper.sleep(seconds)
 
     def _dawn_on(self, day: date) -> datetime:
@@ -256,13 +273,3 @@ class Scheduler:
     def _local_day(self, moment: datetime) -> date:
         """The day in the agent's zone. A plan is about the group's day."""
         return moment.astimezone(self._clock.zone).date()
-
-
-def _minutes(span: timedelta) -> str:
-    """A duration a human reads at a glance, for a log line."""
-    total = span.total_seconds()
-    if total < 90:
-        return f"{total:.0f}s"
-    if total < 5400:
-        return f"{total / 60:.0f}m"
-    return f"{total / 3600:.1f}h"
