@@ -12,13 +12,12 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
-import threading
 import time
 from collections.abc import Mapping, Sequence
-from types import FrameType
 
 import httpx
+import psycopg
+import uvicorn
 
 from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
@@ -28,11 +27,14 @@ from rebe_agent.curate import DEFAULT_FILTERS
 from rebe_agent.db import open_pool
 from rebe_agent.evolution import EvolutionError, build_client
 from rebe_agent.feeds import WebCandidates
+from rebe_agent.memory import PostgresGroupMemory
 from rebe_agent.news import NewsLeg
 from rebe_agent.pacer import Pacer, SendRefusedError
 from rebe_agent.posted import PostgresPostedStore
+from rebe_agent.reply import ReplyLeg
 from rebe_agent.sends import PostgresSendLog, SendKind
 from rebe_agent.usage import CallType, PostgresUsageStore
+from rebe_agent.webhook import WEBHOOK_HOST, WEBHOOK_PORT, build_app
 
 EXIT_OK = 0
 EXIT_BAD_CONFIG = 2
@@ -251,27 +253,81 @@ async def post_news_once(settings: Settings, clock: Clock, chat: str, limit: int
     return EXIT_OK
 
 
+async def serve_webhook(settings: Settings, clock: Clock) -> int:
+    """The long-running process: the webhook leg, listening on the internal network.
+
+    Every store lives in the same `rebe` database, so they share one pool, and
+    the pacer here is the same object the news leg would use - one limiter over
+    both legs is the whole point of section 2.2 of the deployment spec.
+
+    The schema is prepared *beside* the server rather than before it. A Postgres
+    that is briefly unreachable at boot must not stop the process coming up: an
+    agent that is alive and silent recovers on its own, while one that crash-loops
+    on a cold database needs a human. Uvicorn also owns SIGTERM from its first
+    moment this way, so a stop during a slow first connection is still clean.
+    """
+    async with (
+        open_pool(settings.rebe_database_url.get_secret_value()) as pool,
+        build_client(settings) as evolution,
+    ):
+        usage = PostgresUsageStore(pool)
+        sends = PostgresSendLog(pool)
+        memory = PostgresGroupMemory(pool)
+        preparing = asyncio.create_task(_prepare(usage, sends, memory))
+
+        leg = ReplyLeg(
+            build_brain(settings, clock, usage),
+            Pacer(evolution, sends, clock),
+            evolution,
+            memory,
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(
+                build_app(leg, settings.webhook_secret.get_secret_value()),
+                host=WEBHOOK_HOST,
+                port=WEBHOOK_PORT,
+                # The agent configures its own logging from LOG_LEVEL; uvicorn's
+                # defaults would replace it and take the format with them.
+                log_config=None,
+                access_log=False,
+            )
+        )
+        logger.info(
+            "serving the webhook leg on port %d as instance %s",
+            WEBHOOK_PORT,
+            settings.evolution_instance,
+        )
+        try:
+            await server.serve()
+        finally:
+            preparing.cancel()
+
+    logger.info("rebe-agent stopped")
+    return EXIT_OK
+
+
+async def _prepare(
+    usage: PostgresUsageStore, sends: PostgresSendLog, memory: PostgresGroupMemory
+) -> None:
+    """Make sure the `rebe` tables exist, without being able to stop the boot."""
+    try:
+        await usage.ensure_schema()
+        await sends.ensure_schema()
+        await memory.ensure_schema()
+    except psycopg.Error as exc:
+        logger.error("the rebe database is not ready; Rebe will stay silent until it is. %s", exc)
+    else:
+        logger.info("the rebe database is ready")
+
+
 def run(settings: Settings, clock: Clock) -> int:
     """Hold the process open until the platform stops it.
 
-    The news leg exists, but only on demand through `--post-news`: what puts it
-    on a timer is the cadence ticket. The webhook leg lands in a later one. So
-    this skeleton still only has to boot, stay up, and shut down on SIGTERM.
+    The webhook leg is what keeps it open. The news leg exists too, but only on
+    demand through `--post-news`: what puts it on a timer is the cadence ticket.
     """
     apply_timezone(settings.timezone)
-    stopping = threading.Event()
-
-    def _stop(signum: int, _frame: FrameType | None) -> None:
-        logger.info("received %s, shutting down", signal.Signals(signum).name)
-        stopping.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(sig, _stop)
-
-    logger.info("no legs wired yet; idling as instance %s", settings.evolution_instance)
-    stopping.wait()
-    logger.info("rebe-agent stopped")
-    return EXIT_OK
+    return asyncio.run(serve_webhook(settings, clock))
 
 
 def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None) -> int:

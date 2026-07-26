@@ -4,8 +4,8 @@ Rebe, the bien.mx WhatsApp news agent.
 One Python process, one replica, two triggers (an Evolution webhook and a scheduled news leg) and one shared pacer.
 
 The design lives in `docs/wayfinder/`; `deployment-architecture-spec.md` is the map.
-This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, the shared pacer both legs send through, and the news leg itself.
-The news leg runs on demand; putting it on a timer is the cadence ticket, and the webhook leg lands in a later one.
+This repo currently holds the skeleton - typed configuration, an injectable clock, the container, the test gate - the DeepSeek brain both legs call, the shared pacer both legs send through, and both legs themselves.
+The webhook leg is what the process serves when it starts; the news leg runs on demand, and putting it on a timer is the cadence ticket.
 
 ## Running it
 
@@ -16,7 +16,7 @@ A missing or malformed variable stops the process at boot with a message naming 
 ```sh
 docker build -t rebe-agent .
 docker run --rm --env-file .env rebe-agent --check-config   # validate and exit
-docker run --rm --env-file .env rebe-agent                  # boot and stay up
+docker run --rm --env-file .env rebe-agent                  # boot and serve the webhook leg
 ```
 
 `--check-config` validates the environment, logs the startup line, and exits - useful in CI and after changing Coolify variables.
@@ -89,6 +89,33 @@ A rejected answer moves the run on to the next candidate, up to a small bound; a
 Then the post goes out through the shared pacer, and only after that is the item written to the posted store - so a failed send costs a re-fetch rather than losing the item for good.
 `--limit N` caps how many items one run may post; the default is one, and the pacer's post-to-post gap governs the spacing regardless.
 Running the command again immediately posts nothing, because every candidate is already known.
+
+## The webhook leg
+
+`rebe_agent/webhook.py` and `rebe_agent/reply.py` are the other trigger: somebody in the group says her name, and she answers.
+Starting the container with no arguments serves it.
+
+Evolution's per-instance webhook posts `messages.upsert` to `POST /webhook/<WEBHOOK_SECRET>` on the internal Docker network.
+The agent has no public URL, so that traffic never leaves the host; the token in the path is defence in depth against everything else already inside the network.
+A wrong or missing token is answered `404` rather than `403`, compared with `secrets.compare_digest`, and nothing else happens.
+Every delivery that gets past the token is answered `200` with the same dull body, whatever Rebe then decides - a non-200 would earn a redelivery of a payload that will never work, and the answer is not something an unauthenticated caller should be able to read Rebe's behaviour off.
+
+`rebe_agent/inbound.py` decides which of the reply policy's three tiers the message falls in, and it decides it *mechanically*.
+A message is addressed when it @-mentions her, names her as a whole word, or replies to or quotes one of her messages - all facts about the payload, so tier one cannot be missed by a bad classification and the decisions are tested against recorded webhook bodies.
+Her own echoed sends, media with no readable words, and private chats are silence.
+Unaddressed chatter is remembered and left alone: the occasional chime-in is its own ticket.
+
+An addressed message costs two DeepSeek calls.
+The first classifies the topic - on-topic, off-topic or personal, a no-go area, or "¿eres un bot?" - and the second writes one short line under the instructions that topic earns.
+On-topic gets a real light answer; the rest get a human deflection rather than a lookup, and the no-go areas get exactly one deflection before the thread goes quiet, with no steering back to AI.
+Then the incoming message is marked read, so the blue ticks land before the reply, and the reply goes out through the same shared pacer as every news post.
+
+Everything fails toward silence, and there is never an error message in the group.
+A gate that errors, a classification under 50% confidence, a generation that comes back empty, a reply carrying a link, a figure nobody gave her, a second emoji, or an admission that she is a bot, a closed envelope, a dead transport: all of them end with nothing sent.
+That deliberately overrides "she always answers when addressed" - a dropped reply looks like she put her phone down, a broken one looks like a bot.
+
+The rolling window of recent turns per group lives in `group_memory` in the `rebe` database and is handed back to the model on every event, so a follow-up lands as a follow-up and a restart does not lose the thread.
+The same table is what refuses a redelivered webhook, keeps her from answering the same person twice with nobody speaking in between, and lets a thread fade after two or three turns without a closing message.
 
 ## Working on it
 

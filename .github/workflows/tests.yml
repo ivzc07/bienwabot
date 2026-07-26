@@ -121,6 +121,25 @@ jobs:
             -c 'from rebe_agent.feeds import FEEDS; print("feeds", len(FEEDS), sorted(f.key for f in FEEDS)[0])' \
             | grep -q 'feeds 8 deepmind'
           docker run --rm --env-file .env.ci rebe-agent:ci --help | grep -q -- '--post-news'
+
+      # And the webhook leg, which is what the container serves when it starts.
+      # The port is published to loopback for this step only: in production the
+      # agent has no published port and no public FQDN, and Evolution reaches it
+      # by container name over the internal network.
+      - name: The webhook leg serves, and only with the token
+        run: |
+          id=$(docker run -d -p 127.0.0.1:8000:8000 --env-file .env.ci rebe-agent:ci)
+          # Any HTTP answer means it is listening; -f is deliberately absent
+          # because the answer to this probe is a 405 and that is still "up".
+          for _ in $(seq 30); do
+            curl -s -o /dev/null http://127.0.0.1:8000/webhook/nope && break || sleep 1
+          done
+          code() { curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H 'content-type: application/json' -d '{}' "$1"; }
+          test "$(code http://127.0.0.1:8000/webhook/nope)" = "404"
+          test "$(code http://127.0.0.1:8000/webhook/ci-placeholder)" = "200"
+          docker logs "$id"
+          docker rm -f "$id" > /dev/null
       - name: Refuse to boot with a required variable missing
         run: |
           grep -v '^DEEPSEEK_API_KEY=' .env.ci > .env.broken

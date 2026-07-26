@@ -38,8 +38,6 @@ can act on.
 from __future__ import annotations
 
 import logging
-import re
-import unicodedata
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
@@ -53,14 +51,12 @@ from rebe_agent.pacer import Pacer, SendRefusedError, SentMessage
 from rebe_agent.posted import PostedStore
 from rebe_agent.sends import SendKind
 from rebe_agent.usage import CallType
+from rebe_agent.voice import DIGITS, LINKISH, MAX_EMOJI, emoji_count
 
 logger = logging.getLogger("rebe_agent.news")
 
 MAX_FRAMING_CHARS = 240
 """WhatsApp-short, per the persona spec: news is one or two lines, not a paragraph."""
-
-MAX_EMOJI = 1
-"""The persona spec dials Rebe down to 0-1 per message, often none."""
 
 REJECTIONS_PER_RUN = 2
 """How many unusable answers a run pays for before it gives up.
@@ -129,7 +125,7 @@ def render(post: NewsPost, item: NewsItem) -> str:
         raise PostRejectedError("the model wrote no line")
     if len(framing) > MAX_FRAMING_CHARS:
         raise PostRejectedError(f"{len(framing)} characters is not a WhatsApp message")
-    if _LINKISH.search(framing):
+    if LINKISH.search(framing):
         raise PostRejectedError("the model wrote a link; links are appended here, never generated")
 
     emoji = emoji_count(framing)
@@ -146,65 +142,6 @@ def render(post: NewsPost, item: NewsItem) -> str:
     return f"{framing}\n{item.link}"
 
 
-_LINKISH = re.compile(r"https?://|www\.|\.com\b|\.mx\b|\.ai\b|\.org\b", re.IGNORECASE)
-"""Anything shaped like an address. The real link is appended after this check."""
-
-_DIGITS = re.compile(r"\d+")
-
-_EMOJI = "So"
-"""Unicode's "symbol, other" - the category most emoji live in."""
-
-_MODIFIER = "Sk"
-""""Symbol, modifier": the skin tones, which colour the emoji before them."""
-
-_EMOJI_PRESENTATION = "\ufe0f"
-"""U+FE0F. Turns an ordinary character into its emoji form: `!!` becomes an emoji."""
-
-_JOINERS = frozenset("\u200d\ufe0f\ufe0e")
-"""Zero-width joiner and the variation selectors, which glue two emoji into one."""
-
-_REGIONAL_INDICATORS = frozenset(chr(point) for point in range(0x1F1E6, 0x1F200))
-"""The A-Z letters flags are built from. Two of them are one flag, not two emoji."""
-
-
-def emoji_count(text: str) -> int:
-    """How many emoji a reader would see.
-
-    Counted the way a reader counts them, not the way Unicode stores them, because
-    the rule the persona spec sets - at most one, usually none - is about pictures
-    on a screen. Three cases make that different from counting code points:
-
-    - A joined sequence (a family, a skin-toned wave) is one picture.
-    - A flag is *two* regional-indicator letters and one picture, so counting code
-      points would refuse a perfectly ordinary "viva mexico \ud83c\uddf2\ud83c\uddfd".
-    - A character followed by U+FE0F is an emoji whatever its own category says,
-      so `\u203c\ufe0f` counts even though `\u203c` alone is punctuation.
-
-    Two emoji side by side with nothing between them are still two.
-    """
-    count = 0
-    joined = False
-    half_a_flag = False
-    for index, character in enumerate(text):
-        if character in _REGIONAL_INDICATORS:
-            # The second letter completes the flag the first one opened.
-            count += not (joined or half_a_flag)
-            half_a_flag = not half_a_flag
-            joined = False
-            continue
-
-        half_a_flag = False
-        category = unicodedata.category(character)
-        if category == _EMOJI or text[index + 1 : index + 2] == _EMOJI_PRESENTATION:
-            count += not joined
-            joined = False
-        elif character in _JOINERS:
-            joined = True
-        elif category != _MODIFIER:
-            joined = False
-    return count
-
-
 def _invented_numbers(framing: str, grounding: str) -> list[str]:
     """Digits in the post that the source item never supplied.
 
@@ -212,8 +149,8 @@ def _invented_numbers(framing: str, grounding: str) -> list[str]:
     invented detail a reader can act on - a price, a parameter count, a date - so
     it is the half worth enforcing rather than trusting.
     """
-    supplied = set(_DIGITS.findall(grounding))
-    return [number for number in _DIGITS.findall(framing) if number not in supplied]
+    supplied = set(DIGITS.findall(grounding))
+    return [number for number in DIGITS.findall(framing) if number not in supplied]
 
 
 class NewsLeg:
