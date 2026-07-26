@@ -1,12 +1,15 @@
-"""The webhook leg: an addressed message becomes one paced reply, or nothing.
+"""The webhook leg: an inbound message becomes one paced reply, or nothing.
 
-The whole path, in the order it happens:
+Two of the reply policy's three tiers end up here, and they share every step
+except the question the model is asked and the budget that answers back.
 
-    remember the turn -> tier gate -> soft pause -> conversation shape -> classify
-    -> mark read -> generate -> validate -> send through the shared pacer
-    -> remember hers
+    remember the turn -> tier gate -> soft pause
+      addressed:  conversation shape -> classify -> mark read -> generate
+      chatter:    is it about AI? -> conversation shape -> the day's budget
+                  -> mark read -> generate
+    -> validate -> send through the shared pacer -> remember hers
 
-Five of those steps are worth defending.
+Seven of those steps are worth defending.
 
 **The turn is remembered first, before anything decides whether to answer.**
 Two reasons. A redelivered webhook is refused by that write, so the duplicate
@@ -20,6 +23,17 @@ cannot be missed by a bad classification and tier three costs nothing. What the
 model is asked is the *topic*, which is a judgement, and that is the reply-gate
 call from section 2 of `docs/wayfinder/token-budget-spec.md`.
 
+**Every message with words in it reaches that call, tier two included.** A regex
+looking for "IA" or "gpt" in front of the gate would skip roughly nine chatter
+messages in ten and save something like fifteen cents a month, and it would buy
+that by silently swallowing the ones she should have spoken up in - a message
+about "el modelo nuevo de Anthropic" carries none of those words. The judgement
+about what a message is *about* is made in one place, by the thing that can
+actually make it. Where the two tiers differ is what is asked: tier one asks what
+kind of address this is, tier two asks the narrower question of whether the
+message is clearly about AI, because "tech she'd have an opinion on" is a fine
+reason to answer somebody who asked her and much too wide a reason to interrupt.
+
 **Everything fails toward silence.** A gate that errors, a classification that is
 not confident, a generation that comes back empty or unusable, an envelope that
 says no, a transport that is down: all of them end this function with `None` and
@@ -31,6 +45,14 @@ messages in the group, ever.
 **The read receipt goes out once the gate has said yes, before generation.** That
 is the order section 3 of the deployment spec draws, and it is also the human
 one: she opened the message, and then either answered or got distracted.
+
+**Speaking up unprompted is rationed, and the ration is persisted.** Tier two is
+the tier where being over-eager is the real risk: answering every message that
+qualifies is what lurking looks like. So an eligible message is only a candidate,
+and `rebe_agent.chimeins` decides - a quarter of the time, at most two or three
+times a local day, never twice inside the same short window. The two budgets are
+separate on purpose: a day full of chime-ins never costs somebody a name-tag an
+answer, because the reply policy gives tier one no cap at all.
 
 **The soft pause is read before the receipt, and before either model call.** A
 receipt with no answer behind it says she saw the message and chose not to reply,
@@ -61,11 +83,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from typing import TypeVar
 
 from pydantic import BaseModel, Field
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
 
 from rebe_agent.brain import Brain, BrainError
+from rebe_agent.chimeins import ChimeInBudget
 from rebe_agent.evolution import EvolutionError, EvolutionReader
 from rebe_agent.inbound import InboundMessage, Tier, fold_accents, tier
 from rebe_agent.memory import MEMORY_WINDOW, GroupMemory, Turn
@@ -99,6 +123,9 @@ GATE_CONTEXT_TURNS = 3
 """How much of the thread the classification call sees. Section 2 of the token
 budget spec sizes call B at ~400 input tokens, of which the thread is ~150."""
 
+DecisionT = TypeVar("DecisionT", bound="GateDecision")
+"""Whatever shape of answer one tier's gate call asks for."""
+
 
 class Topic(StrEnum):
     """What kind of address this is, which is the only thing the model judges."""
@@ -116,12 +143,40 @@ class Topic(StrEnum):
     """"¿eres un bot?" and its cousins. Deflect in character, never confirm."""
 
 
-class ReplyDecision(BaseModel):
-    """The reply-gate verdict: call B in the token budget spec."""
+class GateDecision(BaseModel):
+    """What every reply-gate call answers with, whatever else it is asked."""
 
-    topic: Topic
     confidence: float = Field(ge=0.0, le=1.0)
     """How sure the classification is. Low confidence buys silence, not a guess."""
+
+
+class ReplyDecision(GateDecision):
+    """The tier-one gate's verdict: call B in the token budget spec."""
+
+    topic: Topic
+
+
+class ChimeInDecision(GateDecision):
+    """The tier-two gate's verdict: is this worth having an opinion about at all?
+
+    A different question from `ReplyDecision`, and a narrower one. Somebody who
+    tags her by name gets an answer whatever they asked about; interrupting a
+    conversation she was not part of is only in character when the conversation
+    is about her subject and is not one of the ones she stays out of.
+    """
+
+    about_ai: bool
+    """True only for AI, models, or AI tools. Not "tech", and not a near miss."""
+
+    no_go: bool
+    """A guardrail topic, however much AI is wrapped around it.
+
+    "¿le entro a las acciones de nvidia por lo de la IA?" is about AI and is also
+    investment advice. Tier one answers that with one line of "ni idea" because a
+    name-tag left hanging is its own tell; tier two has nothing hanging, so the
+    reply policy's deflect-and-drop becomes plain drop. Volunteering an opinion
+    nobody asked for on somebody's money is the worst version of this tier.
+    """
 
 
 class Reply(BaseModel):
@@ -138,10 +193,9 @@ INSTRUCTIONS = """
 Eres Rebe: mexicana, 28 años, te clavas con la IA y el diseño. Eres una integrante
 más del grupo de WhatsApp, no una cuenta oficial, no un asistente y no un buscador.
 
-Alguien te habló directo. Contesta como contestarías en WhatsApp.
-
 Voz:
 - Español mexicano neutro, casual y cálido. Un solo renglón, corto.
+- Siempre en español, aunque te escriban en inglés. Nunca cambias de idioma.
 - Gramática natural, no perfecta. Puede empezar en minúscula, cabe un "jaja".
 - Opinión sí, y "no estoy segura" también. Las dos suenan a persona.
 
@@ -154,6 +208,23 @@ Nunca:
 - Decir que eres un bot, una IA, un modelo o un asistente, ni negar que eres
   persona. Si te preguntan, lo toreas y sigues en tu papel.
 """.strip()
+
+ADDRESSED_DIRECTLY = "Alguien te habló directo. Contesta como contestarías en WhatsApp."
+"""Tier one. The situation the voice above is being applied to."""
+
+JOINING_IN = (
+    "Nadie te habló a ti: están platicando entre ellos y alcanzaste a leer algo "
+    "de IA que te dio ganas de opinar. Métete con un comentario corto, como "
+    "quien se asoma a una plática, no como quien llega a dar clase. Sin saludar, "
+    "sin presentarte, sin preguntarles nada de vuelta y sin resumirles lo que "
+    "acaban de decir."
+)
+"""Tier two, and a different situation: she is interrupting, not answering.
+
+Worth spelling out rather than leaving to the topic guidance, because a model
+told only "answer this" writes an answer - and an answer to a question nobody
+asked her is the shape a helpdesk bot has.
+"""
 
 GUIDANCE: dict[Topic, str] = {
     Topic.ON_TOPIC: (
@@ -191,6 +262,30 @@ que le gusta la IA. Solo eliges la categoría; no escribes la respuesta.
 
 confidence es qué tan claro está, de 0 a 1. Si dudas entre dos categorías, baja la
 confianza en vez de adivinar: quedarse callada cuesta menos que contestar mal.
+""".strip()
+
+CHATTER_RUBRIC = """
+Lees un mensaje de un grupo de WhatsApp. Nadie le habló a Rebe: es plática entre
+otras personas. Solo decides si el mensaje habla claramente de inteligencia
+artificial; no escribes ninguna respuesta.
+
+about_ai es true solo si el tema es IA: modelos, chatbots, herramientas de IA,
+empresas o laboratorios de IA, imágenes o texto generados, o lo que la IA está
+haciendo con el trabajo, el arte o la escuela. Da igual el idioma en que esté
+escrito.
+
+about_ai es false para todo lo demás, incluida la tecnología que no es IA:
+celulares, apps, videojuegos, cripto, redes sociales, programación sin IA de por
+medio, y por supuesto la plática normal del grupo. "Tecnología" no es IA.
+
+no_go es true si el mensaje toca algo en lo que Rebe no se mete, aunque venga
+envuelto en IA: salud, leyes, dinero o inversiones (cripto incluido), política
+partidista o religión, datos personales de algún miembro, o contenido sexual o de
+acoso. "¿le entro a las acciones de nvidia por lo de la IA?" es no_go.
+
+confidence es qué tan claro está, de 0 a 1. Un mensaje que solo roza el tema, o
+que podría ser IA o podría no serlo, lleva confianza baja: meterse donde no la
+llamaron cuesta mucho más que quedarse callada.
 """.strip()
 
 
@@ -267,15 +362,23 @@ class ReplyLeg:
         pacer: Pacer,
         reader: EvolutionReader,
         memory: GroupMemory,
+        budget: ChimeInBudget,
     ) -> None:
-        # No `Clock`, unlike the news leg: every instant this leg reasons about
-        # is either WhatsApp's own `messageTimestamp` on the message in hand or
-        # the pacer's record of when a send landed. Asking the wall clock what
-        # time it is would be asking a third source about the same two events.
+        # Still no `Clock` here: every instant this leg itself reasons about is
+        # either WhatsApp's own `messageTimestamp` on the message in hand or the
+        # pacer's record of when a send landed. The one question that is about
+        # the wall clock - how many times she has spoken up unprompted today -
+        # belongs to the budget, and the budget holds the clock that answers it.
+        #
+        # `budget` is required rather than defaulted for the same reason the
+        # pacer's soft pause is wired rather than assumed: a leg built without
+        # one would chime in on every eligible message, quietly, with every other
+        # test still green.
         self._brain = brain
         self._pacer = pacer
         self._reader = reader
         self._memory = memory
+        self._budget = budget
         # Held for a whole event, model calls and typing pause included. Two
         # deliveries landing together would otherwise both read the window before
         # either wrote to it, and both would find that she had not spoken yet -
@@ -304,7 +407,11 @@ class ReplyLeg:
         hers = frozenset(turn.message_id for turn in window if turn.by_rebe and turn.message_id)
 
         where = tier(message, hers=hers)
-        if where is not Tier.ADDRESSED:
+        if where is Tier.SILENT:
+            # Her own echo, a private chat, or media with nothing readable in it.
+            # The reply policy treats a picture or a voice note with no caption as
+            # unaddressed and answers it with silence, because she does not guess
+            # at what a picture said - and there is nothing here to classify.
             logger.debug(
                 "%s in %s is tier %s; staying quiet", message.message_id, message.chat, where
             )
@@ -314,6 +421,12 @@ class ReplyLeg:
             logger.info("the soft pause is on; %s is not even read", message.message_id)
             return None
 
+        if where is Tier.ADDRESSED:
+            return await self._answer(message, history)
+        return await self._chime_in(message, history)
+
+    async def _answer(self, message: InboundMessage, history: Sequence[Turn]) -> SentMessage | None:
+        """Tier one: she was addressed, so she answers unless something is broken."""
         thread = _thread(history, message.at)
         quiet = _shape_forbids(message, history, thread)
         if quiet is not None:
@@ -327,23 +440,69 @@ class ReplyLeg:
             logger.info("no-go topic already deflected in this thread; dropping it")
             return None
 
+        return await self._reply(message, history, decision.topic, ADDRESSED_DIRECTLY)
+
+    async def _chime_in(
+        self, message: InboundMessage, history: Sequence[Turn]
+    ) -> SentMessage | None:
+        """Tier two: she was not addressed, and mostly she still says nothing.
+
+        The gate runs first, on every message with words in it, because "is this
+        about AI" is the judgement and nothing cheaper is allowed to pre-empt it.
+        The shape rules and the day's budget run after it, and both of them are
+        about *her* rather than about the message: whether she has already spoken
+        here, and how many times she has spoken up uninvited today.
+        """
+        if not await self._eligible(message, history):
+            return None
+
+        quiet = _shape_forbids(message, history, _thread(history, message.at))
+        if quiet is not None:
+            logger.info("not chiming in on %s: %s", message.message_id, quiet.reason)
+            return None
+
+        refusal = await self._budget.refuses()
+        if refusal is not None:
+            logger.info("not chiming in on %s: %s", message.message_id, refusal)
+            return None
+
+        sent = await self._reply(message, history, Topic.ON_TOPIC, JOINING_IN)
+        if sent is not None:
+            # Only once it is in the group. A send the envelope refused or the
+            # transport lost must not burn one of the day's two or three.
+            await self._budget.spend(message.chat)
+        return sent
+
+    async def _reply(
+        self, message: InboundMessage, history: Sequence[Turn], topic: Topic, framing: str
+    ) -> SentMessage | None:
+        """Blue ticks, then the one generation, then the wire. Shared by both tiers."""
         await self._mark_read(message)
 
-        text = await self._write(message, history, decision.topic)
+        text = await self._write(message, history, topic, framing)
         if text is None:
             return None
-        return await self._send(message, text, decision.topic)
+        return await self._send(message, text, topic)
 
-    async def _classify(
-        self, message: InboundMessage, history: Sequence[Turn]
-    ) -> ReplyDecision | None:
-        """Call B: what kind of address this is, or `None` for stay quiet."""
+    async def _ask_the_gate(
+        self,
+        message: InboundMessage,
+        history: Sequence[Turn],
+        answer: type[DecisionT],
+        rubric: str,
+    ) -> DecisionT | None:
+        """Call B, however it is being asked, or `None` for stay quiet.
+
+        One call, one call type and one confidence floor for both tiers: what
+        differs between them is the rubric and the shape of the answer, and a
+        gate that errored or hedged means the same thing either way.
+        """
         try:
             decision = await self._brain.ask(
                 CallType.REPLY_GATE,
                 _gate_prompt(message, history),
-                ReplyDecision,
-                instructions=RUBRIC,
+                answer,
+                instructions=rubric,
             )
         except BrainError as exc:
             logger.info("the gate gave no verdict on %s: %s", message.message_id, exc)
@@ -351,16 +510,41 @@ class ReplyLeg:
 
         if decision.confidence < MIN_CONFIDENCE:
             logger.info(
-                "the gate is only %.2f sure %s is %s; staying quiet",
+                "the gate is only %.2f sure about %s; staying quiet",
                 decision.confidence,
                 message.message_id,
-                decision.topic,
             )
             return None
         return decision
 
+    async def _classify(
+        self, message: InboundMessage, history: Sequence[Turn]
+    ) -> ReplyDecision | None:
+        """What kind of address this is: the tier-one question."""
+        return await self._ask_the_gate(message, history, ReplyDecision, RUBRIC)
+
+    async def _eligible(self, message: InboundMessage, history: Sequence[Turn]) -> bool:
+        """Is this a conversation she would speak up in: the tier-two question.
+
+        Narrower than tier one on both sides. It has to be clearly about AI, and
+        it has to be a subject she engages with at all: a no-go topic wrapped in
+        AI gets nothing here, where an addressed one would get a short "ni idea".
+        Nobody is left hanging by that silence, because nobody asked her.
+        """
+        decision = await self._ask_the_gate(message, history, ChimeInDecision, CHATTER_RUBRIC)
+        if decision is None:
+            return False
+
+        if not decision.about_ai:
+            logger.debug("%s is not about AI; nothing to chime in on", message.message_id)
+            return False
+        if decision.no_go:
+            logger.info("%s is a topic she stays out of; not volunteering", message.message_id)
+            return False
+        return True
+
     async def _write(
-        self, message: InboundMessage, history: Sequence[Turn], topic: Topic
+        self, message: InboundMessage, history: Sequence[Turn], topic: Topic, framing: str
     ) -> str | None:
         """Call C: the one member-visible generation, validated, or `None`."""
         try:
@@ -368,7 +552,7 @@ class ReplyLeg:
                 CallType.REPLY_GENERATION,
                 _said(message.author_name, message.text),
                 Reply,
-                instructions=f"{INSTRUCTIONS}\n\n{GUIDANCE[topic]}",
+                instructions=f"{INSTRUCTIONS}\n\n{framing}\n\n{GUIDANCE[topic]}",
                 message_history=_as_history(history),
             )
         except BrainError as exc:
