@@ -41,7 +41,7 @@ from rebe_agent.reply import (
 )
 from rebe_agent.sends import InMemorySendLog, SendKind
 from rebe_agent.usage import CallType, InMemoryUsageStore
-from tests.deepseek_stub import FakeDeepSeek, tool_call_response
+from tests.deepseek_stub import FakeDeepSeek, json_output_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, MEXICO_CITY, NOON, RecordingAlerter
 from tests.test_chimeins import Rolls
@@ -69,18 +69,18 @@ NO = 0.99
 
 
 def verdict(topic: Topic | str = Topic.ON_TOPIC, confidence: float = 0.9) -> dict[str, Any]:
-    return tool_call_response(json.dumps({"topic": str(topic), "confidence": confidence}))
+    return json_output_response(json.dumps({"topic": str(topic), "confidence": confidence}))
 
 
 def about_ai(is_it: bool = True, *, no_go: bool = False, confidence: float = 0.9) -> dict[str, Any]:
     """The tier-two gate's verdict on a message nobody addressed to her."""
-    return tool_call_response(
+    return json_output_response(
         json.dumps({"about_ai": is_it, "no_go": no_go, "confidence": confidence})
     )
 
 
 def wrote(text: str = VOICE) -> dict[str, Any]:
-    return tool_call_response(json.dumps({"text": text}))
+    return json_output_response(json.dumps({"text": text}))
 
 
 def message(name: str = "by_name", **edits: Any) -> InboundMessage:

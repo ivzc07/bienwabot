@@ -124,9 +124,14 @@ def _clip(detail: str, limit: int = 600) -> str:
 class CallShape:
     """How much room a call type gets, and how loose its voice is.
 
-    Output caps are roughly 2-3x the estimates in section 2 of the token budget
-    spec: generous enough that a normal answer is never truncated, tight enough
-    that a runaway generation stops within cents.
+    Output caps were once roughly 2-3x the estimates in section 2 of the token
+    budget spec. They are wider than that now, because the cap covers everything
+    the model generates and V4 generates chain-of-thought whether or not it was
+    asked to: a 120-token gate, four times its own estimate, was still truncated
+    mid-answer in production. The principle is unchanged - generous enough that a
+    normal answer is never cut off, tight enough that a runaway generation stops
+    within cents - but the room a thinking model needs is not the size of its
+    answer.
     """
 
     max_tokens: int
@@ -137,12 +142,14 @@ CALL_SHAPES: dict[CallType, CallShape] = {
     # A: a WhatsApp-short Spanish post wrapped in JSON. Estimated at ~150 tokens.
     CallType.NEWS_SUMMARY: CallShape(max_tokens=400, temperature=0.8),
     # B: a small typed verdict. Estimated at ~30 tokens, and a judgement call
-    # wants to be repeatable, so the temperature is low.
-    CallType.REPLY_GATE: CallShape(max_tokens=120, temperature=0.2),
+    # wants to be repeatable, so the temperature is low. The cap is nowhere near
+    # 2-3x that estimate because on V4 the cap covers the chain-of-thought too,
+    # and 120 truncated a live call mid-answer.
+    CallType.REPLY_GATE: CallShape(max_tokens=600, temperature=0.2),
     # C: the only member-visible prose. Estimated at ~60 tokens.
-    CallType.REPLY_GENERATION: CallShape(max_tokens=300, temperature=0.9),
+    CallType.REPLY_GENERATION: CallShape(max_tokens=600, temperature=0.9),
     # D: B against an article instead of a chat message. Estimated at ~50 tokens.
-    CallType.RELEVANCE_GATE: CallShape(max_tokens=150, temperature=0.2),
+    CallType.RELEVANCE_GATE: CallShape(max_tokens=600, temperature=0.2),
     # The `--ask` smoke test. Room to say something, not room to ramble.
     CallType.PROBE: CallShape(max_tokens=300, temperature=0.7),
 }
@@ -179,13 +186,27 @@ def usage_from_run(run_usage: RunUsage) -> CallUsage:
 
 
 def _deepseek_profile(resolved: ModelProfile) -> ModelProfile:
-    """Keep Pydantic AI's DeepSeek profile, but send the cap DeepSeek documents.
+    """Keep Pydantic AI's DeepSeek profile, but send the cap DeepSeek documents,
+    and ask for the typed answer the way this model is reliable at giving it.
 
     Pydantic AI defaults to OpenAI's `max_completion_tokens`; DeepSeek's API
     reference only lists `max_tokens`, and an ignored cap is not a cap.
+
+    The output mode is the harder one. Pydantic AI's default is a tool call, and
+    on V4 that is where the reply gate died in production: the model wrote its
+    reasoning into the tool's arguments, and what came back was
+    `Invalid JSON: 'Let me analyze this message...'`. V4 is a thinking model that
+    does not reliably stop thinking when asked - `thinking: disabled` goes out on
+    every request here and the leak happened anyway - and it rejects the forced
+    `tool_choice` that would otherwise pin the shape down. Asking for a JSON
+    object in the message body instead takes the tool call out of the path
+    entirely, and leaves DeepSeek somewhere else to put chain-of-thought: the
+    `reasoning_content` field, which is beside the answer and is not parsed as one.
     """
     pinned: dict[str, Any] = dict(resolved)
     pinned["openai_chat_supports_max_completion_tokens"] = False
+    pinned["supports_json_object_output"] = True
+    pinned["default_structured_output_mode"] = "prompted"
     # The profile TypedDicts are open in practice - the provider's own keys and
     # the OpenAI-specific ones live in the same mapping - so the cast is where
     # that merge is stated once rather than fought with at every key.
