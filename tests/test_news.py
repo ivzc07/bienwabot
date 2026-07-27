@@ -34,7 +34,7 @@ from rebe_agent.posted import InMemoryPostedStore
 from rebe_agent.sends import InMemorySendLog, SendKind
 from rebe_agent.usage import CallType, InMemoryUsageStore
 from rebe_agent.voice import emoji_count
-from tests.deepseek_stub import FakeDeepSeek, tool_call_response
+from tests.deepseek_stub import FakeDeepSeek, json_output_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, NOON, RecordingAlerter, item
 from tests.test_config import COMPLETE_ENV
@@ -50,7 +50,7 @@ there rather than re-argued here."""
 def answer(
     opener: str = "miren", line: str = "salio un modelo que corre en tu compu"
 ) -> dict[str, Any]:
-    return tool_call_response(f'{{"opener": {opener!r}, "line": {line!r}}}'.replace("'", '"'))
+    return json_output_response(f'{{"opener": {opener!r}, "line": {line!r}}}'.replace("'", '"'))
 
 
 LAUNCH = item(

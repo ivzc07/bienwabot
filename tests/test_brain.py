@@ -18,7 +18,7 @@ from rebe_agent.config import Settings, load_settings
 from rebe_agent.guard import STOP_THRESHOLD
 from rebe_agent.signals import Signal
 from rebe_agent.usage import CallType, DayTotals, InMemoryUsageStore
-from tests.deepseek_stub import FakeDeepSeek, tool_call_response
+from tests.deepseek_stub import FakeDeepSeek, json_output_response
 from tests.support import NOON, TODAY, RecordingAlerter
 from tests.test_config import COMPLETE_ENV
 
@@ -62,7 +62,7 @@ def brain_for(
 async def test_a_call_comes_back_as_a_validated_object(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
 
     post = await brain_for(settings, fake, store).ask(
         CallType.NEWS_SUMMARY, "resume esto", NewsPost
@@ -76,7 +76,7 @@ async def test_the_request_explicitly_disables_thinking(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
     """V4 defaults thinking to enabled, which would ignore temperature and bill CoT."""
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
 
     await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume esto", NewsPost)
 
@@ -91,7 +91,7 @@ async def test_the_sampling_knobs_the_persona_needs_are_sent(
     A loose voice for the prose calls and a repeatable one for the gates, so the
     two must not arrive at DeepSeek as the same number.
     """
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
     brain = brain_for(settings, fake, store)
 
     await brain.ask(CallType.REPLY_GENERATION, "contesta", NewsPost)
@@ -108,7 +108,7 @@ async def test_every_call_carries_a_max_tokens(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
     """Under the name DeepSeek documents: a cap the provider ignores is no cap."""
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
     brain = brain_for(settings, fake, store)
 
     for call_type in CallType:
@@ -122,7 +122,7 @@ async def test_a_caller_cannot_ask_for_an_uncapped_call(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
     """The cap is the call type's, not the caller's; there is no knob to forget."""
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
 
     with pytest.raises(TypeError):
         await brain_for(settings, fake, store).ask(
@@ -137,17 +137,47 @@ async def test_the_current_non_thinking_model_is_used(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
     """`deepseek-chat` was retired 2026/07/24; `deepseek-v4-flash` replaced it."""
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
 
     await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
 
     assert fake.last_request["model"] == DEEPSEEK_MODEL == "deepseek-v4-flash"
 
 
+async def test_the_typed_answer_is_asked_for_as_json_and_not_as_a_tool_call(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The reply gate died in production on a tool call whose arguments were the
+    model thinking out loud. V4 will not reliably stop thinking and will not take
+    a forced `tool_choice`, so the tool is out of the path: the schema goes in the
+    instructions and the answer comes back as the message body."""
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
+
+    await brain_for(settings, fake, store).ask(CallType.REPLY_GATE, "clasifica", NewsPost)
+
+    body = fake.last_request
+    assert body["response_format"] == {"type": "json_object"}
+    assert "tools" not in body
+    assert "tool_choice" not in body
+
+
+async def test_reasoning_beside_the_answer_is_not_part_of_the_answer(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """Thinking mode has its own field. A model that fills it and still answers
+    properly must not be treated as a failure, which is what happened when the
+    chain-of-thought was landing in the payload itself."""
+    fake = FakeDeepSeek(json_output_response(VALID_POST, reasoning="Let me analyze this message."))
+
+    post = await brain_for(settings, fake, store).ask(CallType.REPLY_GATE, "clasifica", NewsPost)
+
+    assert post.framing == "Ojo"
+
+
 async def test_a_response_that_fails_validation_is_a_failure_not_a_half_object(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
-    fake = FakeDeepSeek(tool_call_response('{"framing": "Ojo"}'))
+    fake = FakeDeepSeek(json_output_response('{"framing": "Ojo"}'))
 
     with pytest.raises(BrainCallError):
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
@@ -159,7 +189,7 @@ async def test_a_validation_failure_says_which_field_was_wrong(
     """Pydantic AI's own message names the retry policy and not the fault, so a
     caller that logged only that would have to deploy again to learn anything.
     `NewsPost` wants a `line`, and the failure has to say so."""
-    fake = FakeDeepSeek(tool_call_response('{"framing": "Ojo"}'))
+    fake = FakeDeepSeek(json_output_response('{"framing": "Ojo"}'))
 
     with pytest.raises(BrainCallError) as caught:
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
@@ -172,7 +202,7 @@ async def test_a_failure_detail_cannot_grow_without_bound(
 ) -> None:
     """The detail reaches a Telegram alert, so a model that answered with an essay
     must not be quoted back in full."""
-    fake = FakeDeepSeek(tool_call_response('{"framing": "%s"}' % ("ojo " * 2000)))
+    fake = FakeDeepSeek(json_output_response('{"framing": "%s"}' % ("ojo " * 2000)))
 
     with pytest.raises(BrainCallError) as caught:
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
@@ -184,7 +214,7 @@ async def test_a_validation_failure_is_not_retried_into_a_second_billed_call(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
     """One logical call is one request, or the counter cannot detect a loop."""
-    fake = FakeDeepSeek(tool_call_response('{"framing": "Ojo"}'))
+    fake = FakeDeepSeek(json_output_response('{"framing": "Ojo"}'))
 
     with pytest.raises(BrainCallError):
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
@@ -198,7 +228,7 @@ async def test_a_failed_call_still_books_the_tokens_it_was_billed_for(
 ) -> None:
     """A call that fails validation was still generated, and still cost money."""
     fake = FakeDeepSeek(
-        tool_call_response(
+        json_output_response(
             '{"framing": "Ojo"}',
             usage={
                 "prompt_tokens": 1000,
@@ -279,7 +309,7 @@ async def test_reported_usage_is_persisted_per_day_and_call_type(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
     fake = FakeDeepSeek(
-        tool_call_response(
+        json_output_response(
             VALID_POST,
             usage={
                 "prompt_tokens": 1000,
@@ -304,7 +334,7 @@ async def test_usage_without_cache_fields_is_booked_as_a_full_miss(
 ) -> None:
     """A response that omits the cache split must not quietly record zeros."""
     fake = FakeDeepSeek(
-        tool_call_response(
+        json_output_response(
             VALID_POST,
             usage={"prompt_tokens": 400, "completion_tokens": 30, "total_tokens": 430},
         )
@@ -321,7 +351,7 @@ async def test_usage_without_cache_fields_is_booked_as_a_full_miss(
 async def test_calls_of_different_types_are_counted_apart(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
     brain = brain_for(settings, fake, store)
 
     await brain.ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
@@ -338,7 +368,7 @@ async def test_a_stopped_day_makes_no_request_at_all(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
     store.seed(TODAY, CallType.REPLY_GATE, DayTotals(calls=STOP_THRESHOLD))
-    fake = FakeDeepSeek(tool_call_response(VALID_POST))
+    fake = FakeDeepSeek(json_output_response(VALID_POST))
 
     with pytest.raises(BrainStoppedError):
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)

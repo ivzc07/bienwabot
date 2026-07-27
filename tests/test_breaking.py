@@ -42,7 +42,7 @@ from rebe_agent.scheduler import Scheduler
 from rebe_agent.sends import InMemorySendLog, SendKind, SendRecord, fingerprint
 from rebe_agent.tiers import Tier
 from rebe_agent.usage import InMemoryUsageStore
-from tests.deepseek_stub import FakeDeepSeek, tool_call_response
+from tests.deepseek_stub import FakeDeepSeek, json_output_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, MEXICO_CITY, RecordingAlerter, fixture, item
 from tests.test_config import COMPLETE_ENV
@@ -127,9 +127,9 @@ class Pool:
 
 
 POSTS = (
-    tool_call_response('{"opener": "miren", "line": "esto acaba de salir"}'),
-    tool_call_response('{"opener": "chequen", "line": "y esto tambien"}'),
-    tool_call_response('{"opener": "orale", "line": "y una mas"}'),
+    json_output_response('{"opener": "miren", "line": "esto acaba de salir"}'),
+    json_output_response('{"opener": "chequen", "line": "y esto tambien"}'),
+    json_output_response('{"opener": "orale", "line": "y una mas"}'),
 )
 """Three different answers, because the pacer refuses identical wording twice."""
 

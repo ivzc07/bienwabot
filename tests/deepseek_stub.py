@@ -16,39 +16,30 @@ import httpx
 COMPLETION_PATH = "/chat/completions"
 
 
-def tool_call_response(
-    arguments: str,
+def json_output_response(
+    body: str,
     *,
     usage: dict[str, int] | None = None,
     model: str = "deepseek-v4-flash",
+    reasoning: str | None = None,
 ) -> dict[str, Any]:
-    """A DeepSeek chat completion answering with the `final_result` tool call.
+    """A DeepSeek chat completion answering with a JSON object in `content`.
 
-    That is how Pydantic AI asks for a typed output, so this is the shape a real
-    successful structured call comes back in.
+    That is how this agent asks for a typed output - `response_format` is
+    `json_object` and the schema rides in the instructions - so this is the shape
+    a real successful structured call comes back in. `reasoning` fills the field
+    a thinking model puts its chain-of-thought in, which is beside the answer and
+    never part of it.
     """
+    message: dict[str, Any] = {"role": "assistant", "content": body}
+    if reasoning is not None:
+        message["reasoning_content"] = reasoning
     return {
         "id": "chatcmpl-stub",
         "object": "chat.completion",
         "created": 1_785_000_000,
         "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call-stub",
-                            "type": "function",
-                            "function": {"name": "final_result", "arguments": arguments},
-                        }
-                    ],
-                },
-            }
-        ],
+        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
         "usage": usage
         if usage is not None
         else {
@@ -71,7 +62,7 @@ class FakeDeepSeek:
         many identical calls only has to describe one response.
         """
         self._responses: list[dict[str, Any] | int] = list(responses) or [
-            tool_call_response('{"answer": "hola", "language": "es"}')
+            json_output_response('{"answer": "hola", "language": "es"}')
         ]
         self.requests: list[dict[str, Any]] = []
 

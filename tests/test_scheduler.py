@@ -31,7 +31,7 @@ from rebe_agent.posted import InMemoryPostedStore
 from rebe_agent.scheduler import Scheduler
 from rebe_agent.sends import InMemorySendLog, SendKind, SendRecord, fingerprint
 from rebe_agent.usage import InMemoryUsageStore
-from tests.deepseek_stub import FakeDeepSeek, tool_call_response
+from tests.deepseek_stub import FakeDeepSeek, json_output_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, MEXICO_CITY, RecordingAlerter, item
 from tests.test_config import COMPLETE_ENV
@@ -819,7 +819,7 @@ async def test_a_due_slot_drives_the_news_leg_all_the_way_into_the_group(
         published_at=at(time(7, 30)),
     )
     fake = FakeDeepSeek(
-        tool_call_response('{"opener": "miren", "line": "salio un modelo que corre local"}')
+        json_output_response('{"opener": "miren", "line": "salio un modelo que corre local"}')
     )
 
     class OnePool:

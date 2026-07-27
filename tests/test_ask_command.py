@@ -22,7 +22,7 @@ import pytest
 
 from rebe_agent.__main__ import EXIT_CALL_FAILED, EXIT_OK, main
 from rebe_agent.usage import CallType, PostgresUsageStore
-from tests.deepseek_stub import tool_call_response
+from tests.deepseek_stub import json_output_response
 from tests.test_config import COMPLETE_ENV
 
 DATABASE_URL = os.environ.get("REBE_TEST_DATABASE_URL", "")
@@ -39,7 +39,7 @@ class StubDeepSeek:
     """A DeepSeek-shaped HTTP server on a real port."""
 
     def __init__(self) -> None:
-        self.payload: dict[str, Any] = tool_call_response(ANSWER)
+        self.payload: dict[str, Any] = json_output_response(ANSWER)
         self.seen: list[dict[str, Any]] = []
         self.base_url = ""
 
@@ -130,7 +130,7 @@ def test_the_command_counts_its_call_in_the_rebe_database(env: dict[str, str]) -
 def test_an_unparseable_answer_exits_non_zero(
     env: dict[str, str], deepseek: StubDeepSeek, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    deepseek.respond_with(tool_call_response('{"answer": "sin idioma"}'))
+    deepseek.respond_with(json_output_response('{"answer": "sin idioma"}'))
 
     exit_code = main(["--ask", "¿como vas?"], env=env)
 
