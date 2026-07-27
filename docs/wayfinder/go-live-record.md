@@ -64,8 +64,11 @@ No second notification was created.
 Run 2026-07-27: stopped at 00:25 UTC, Kuma went red at **00:26:56** (`No heartbeat in the time window`) and green again at **00:29:59** (`rebe-agent loop alive`).
 Both Telegram messages arrived in the ops chat.
 So a dead agent is noticed in about two minutes, which is the heartbeat interval plus a little.
-- [ ] A test message in the group draws a reply (webhook leg proven end to end).
-- [ ] One scheduled news post lands unattended. The first drawn slot was 20:41 local on pairing day.
+- [x] A test message in the group draws a reply (webhook leg proven end to end).
+First reply 2026-07-27 03:38 UTC, classified `on_topic`, 2.5 s of typing, message `3EB038AA4695FCFA726FF2`.
+It took two bugs to get there; both are in section 6.
+- [x] One scheduled news post lands unattended.
+The evening slot posted at 02:41 UTC on 2026-07-27, message `3EB04D93297DFAF33D16BE`, nobody watching.
 - [ ] Warm the backup SIM, create its instance, join it to the group, give it the same webhook.
 
 ## 5. Operating notes
@@ -82,3 +85,25 @@ SELECT day, window_name, due_at, state, tier FROM planned_slots ORDER BY due_at;
 The command must be idempotent and under 255 characters, per [the provisioning runbook](bien-evo-provisioning.md), section 9.
 
 `LOG_LEVEL=DEBUG` is what shows the scheduler's waits (`waiting 35m for a look at the news`); it is noisy and worth turning back to `INFO` afterwards.
+
+## 6. What proving the reply leg cost
+
+The first test message never got an answer, and neither did the four after it.
+Two bugs, one behind the other, and neither was visible from the group - Rebe's failure mode is silence, which looks exactly like Rebe deciding not to answer.
+
+**Evolution requires a `delay` on `sendPresence`.**
+Every reply died at the typing indicator with `instance requires property "delay"` and never reached the send.
+The endpoint cannot be asked to only *set* a presence: it shows the presence, waits `delay`, and puts the chat back to `paused`, so the hold is Evolution's to run.
+Fixed in [#46](https://github.com/ivzc07/bienwabot/pull/46) by passing the pacer's drawn pause down in milliseconds instead of sleeping on it locally.
+The pause is still drawn on our side, which is the half that keeps her off a constant delay.
+
+**DeepSeek V4 puts its thinking inside the tool call.**
+With the transport fixed, the gate started failing instead: sometimes `Model token limit (120) exceeded while generating a tool call`, sometimes `Invalid JSON: 'Let me analyze this message...'`.
+Both are the model writing chain-of-thought into the output tool's arguments.
+`thinking: {"type": "disabled"}` was already going out on every request and did not stop it, and V4 rejects the forced `tool_choice` that would pin the shape down.
+Fixed in [#48](https://github.com/ivzc07/bienwabot/pull/48): the typed answer is asked for as a JSON object in the message body, which takes the tool out of the path and leaves the model `reasoning_content` to think in.
+The gate caps went to 600 in the same change, because a cap covers thinking too, and 120 was sized to an answer of about 30 tokens.
+
+Between the two sat a third problem worth naming: the first failure logged only `Exceeded maximum output retries (0)`, which names the retry policy and not the fault.
+[#47](https://github.com/ivzc07/bienwabot/pull/47) made a failed call log what the model actually did.
+Without it the second bug would have cost another blind deploy, and the first guess would have been the token cap alone - which was true and not the cause.
