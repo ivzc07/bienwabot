@@ -88,17 +88,23 @@ jobs:
           sleep 10
           test "$(docker inspect -f '{{.State.Running}}' "$id")" = "true"
           docker stop -t 15 "$id" > /dev/null
-          docker logs "$id"
+          # Read the log once, into a file. `docker logs | grep -q` reads like the
+          # obvious thing and is a race: grep exits at its first match, the pipe
+          # closes under docker, docker dies of SIGPIPE, and `pipefail` turns that
+          # into a failed step with exit 141. It gets likelier the more the
+          # container logged, so it fires on a bad day and passes on a good one.
+          docker logs "$id" > container.log 2>&1
+          cat container.log
           # All three of them, in one process: the webhook leg serving, the
           # scheduler turning, and the ops channel listening. One image that
           # boots two of the three is the failure this step exists to catch.
-          docker logs "$id" 2>&1 | grep -q 'serving the webhook leg on port 8000'
-          docker logs "$id" 2>&1 | grep -q 'scheduler leg up'
-          docker logs "$id" 2>&1 | grep -q 'ops control channel is listening'
+          grep -q 'serving the webhook leg on port 8000' container.log
+          grep -q 'scheduler leg up' container.log
+          grep -q 'ops control channel is listening' container.log
           # Both the Telegram bot token and the Kuma push token live in a URL
           # *path*, so any logged line carrying one is a leaked credential - and
           # httpx logs the URL of every request it makes at INFO by default.
-          if docker logs "$id" 2>&1 | grep -Eq 'api\.telegram\.org/bot.|/api/push/'; then
+          if grep -Eq 'api\.telegram\.org/bot.|/api/push/' container.log; then
             echo "a token-bearing URL reached the log"
             exit 1
           fi
