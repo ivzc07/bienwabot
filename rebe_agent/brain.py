@@ -88,6 +88,38 @@ class BrainCallError(BrainError):
     """The request went out and did not produce a valid typed answer."""
 
 
+def _why(exc: BaseException) -> str:
+    """The exception, and whatever it is standing in front of.
+
+    Pydantic AI reports a schema failure as `Exceeded maximum output retries (0)`,
+    which names the policy that stopped the call and nothing about what the model
+    actually did. What went wrong - the validation errors, the text it sent
+    instead of calling the output tool, the provider's own message - is underneath
+    it as a cause. A log line that keeps only the top of that chain is a failure
+    nobody can act on without a second deploy, which is how this function came to
+    exist.
+
+    Bounded, because a validation error quoting the model's whole answer would
+    otherwise put an unbounded body into a log line and a Telegram alert.
+    """
+    parts: list[str] = [str(exc) or type(exc).__name__]
+    seen = {id(exc)}
+    cause: BaseException | None = exc.__cause__ or exc.__context__
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        parts.append(f"{type(cause).__name__}: {cause}")
+        cause = cause.__cause__ or cause.__context__
+    body = getattr(exc, "body", None)
+    if body is not None:
+        parts.append(f"body: {body}")
+    return _clip(" <- ".join(parts))
+
+
+def _clip(detail: str, limit: int = 600) -> str:
+    collapsed = " ".join(detail.split())
+    return collapsed if len(collapsed) <= limit else f"{collapsed[:limit]}..."
+
+
 @dataclass(frozen=True, slots=True)
 class CallShape:
     """How much room a call type gets, and how loose its voice is.
@@ -247,12 +279,12 @@ class Brain:
                 usage=tally,
             )
         except Exception as exc:
-            logger.warning("DeepSeek %s call failed: %s", call_type, exc)
+            logger.warning("DeepSeek %s call failed: %s", call_type, _why(exc))
             # The caller's answer to this is silence - the item is dropped and the
             # group is told nothing - so the only way anybody learns is the
             # out-of-band channel. The ceiling above is deliberately not alerted
             # here: the guard already says the day is spent, in its own words.
-            failure = BrainCallError(f"{call_type} call failed: {exc}")
+            failure = BrainCallError(f"{call_type} call failed: {_why(exc)}")
             await self._watch.brain_failed(failure)
             raise failure from exc
         finally:

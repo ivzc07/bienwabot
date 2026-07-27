@@ -153,6 +153,33 @@ async def test_a_response_that_fails_validation_is_a_failure_not_a_half_object(
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
 
 
+async def test_a_validation_failure_says_which_field_was_wrong(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """Pydantic AI's own message names the retry policy and not the fault, so a
+    caller that logged only that would have to deploy again to learn anything.
+    `NewsPost` wants a `line`, and the failure has to say so."""
+    fake = FakeDeepSeek(tool_call_response('{"framing": "Ojo"}'))
+
+    with pytest.raises(BrainCallError) as caught:
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    assert "line" in str(caught.value)
+
+
+async def test_a_failure_detail_cannot_grow_without_bound(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The detail reaches a Telegram alert, so a model that answered with an essay
+    must not be quoted back in full."""
+    fake = FakeDeepSeek(tool_call_response('{"framing": "%s"}' % ("ojo " * 2000)))
+
+    with pytest.raises(BrainCallError) as caught:
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    assert len(str(caught.value)) < 1000
+
+
 async def test_a_validation_failure_is_not_retried_into_a_second_billed_call(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
