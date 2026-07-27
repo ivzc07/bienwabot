@@ -57,8 +57,13 @@ Because those crash-looping boots happened before the fix, the ramp was stamped 
 
 ## 4. Still open
 
-- [ ] Attach the Telegram notification to the Kuma monitor. **The monitor currently alerts nobody**, so the kill-and-alert test cannot pass.
-- [ ] Stop the application and confirm the alert fires, then start it and confirm it clears.
+- [x] Attach the Telegram notification to the Kuma monitor.
+Done 2026-07-27: the monitor now uses the notification Kuma already had, `bien.mx health`, which is Telegram on chat `6406624282` - the ops chat.
+No second notification was created.
+- [x] Stop the application and confirm the alert fires, then start it and confirm it clears.
+Run 2026-07-27: stopped at 00:25 UTC, Kuma went red at **00:26:56** (`No heartbeat in the time window`) and green again at **00:29:59** (`rebe-agent loop alive`).
+Both Telegram messages arrived in the ops chat.
+So a dead agent is noticed in about two minutes, which is the heartbeat interval plus a little.
 - [ ] A test message in the group draws a reply (webhook leg proven end to end).
 - [ ] One scheduled news post lands unattended. The first drawn slot was 20:41 local on pairing day.
 - [ ] Warm the backup SIM, create its instance, join it to the group, give it the same webhook.
