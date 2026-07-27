@@ -175,19 +175,20 @@ async def test_a_message_shorter_than_the_floor_still_varies(
     assert all(1.5 <= seconds <= 5.0 for seconds in drawn)
 
 
-async def test_typing_presence_is_refreshed_before_it_expires(
+async def test_the_drawn_pause_is_what_evolution_is_asked_to_hold(
     evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
 ) -> None:
-    """Baileys drops presence after about ten seconds, so a pause longer than the
-    refresh interval has to re-assert it or the group stops seeing "typing"."""
-    slow = TypingProfile(minimum_ms=20_000, maximum_ms=20_000, presence_refresh_seconds=8.0)
-    pacer = make_pacer(evolution, log, clock, sleeper, envelope=ROOMY, typing=slow)
+    """The pause is drawn here and executed there, so the number crossing the wire
+    is the whole of the contract: `delay` is in milliseconds, and it is the draw."""
+    steady = TypingProfile(minimum_ms=4000, maximum_ms=4000)
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=ROOMY, typing=steady)
 
-    await pacer.send(SendKind.POST, GROUP, MESSAGE)
+    sent = await pacer.send(SendKind.POST, GROUP, MESSAGE)
 
-    composing = [presence for presence in evolution.presences if presence == COMPOSING]
-    assert len(composing) == 3  # at 0s, refreshed at 8s and at 16s
-    assert evolution.shape == [COMPOSING, COMPOSING, COMPOSING, "text", PAUSED]
+    composing = [call for call in evolution.calls if call.presence == COMPOSING]
+    assert len(composing) == 1
+    assert composing[0].body["delay"] == round(sent.typing_seconds * 1000) == 4000
+    assert evolution.shape == [COMPOSING, "text", PAUSED]
 
 
 async def test_a_short_pause_needs_no_refresh(pacer: Pacer, evolution: FakeEvolution) -> None:
