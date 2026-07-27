@@ -1,9 +1,10 @@
 """A stand-in Evolution API that records exactly what the pacer sent it.
 
-What these tests are about is the *sequence* on the wire: a `composing` presence,
-then refreshes while the pause runs, then the text, then the presence cleared. So
-the stub sits at the HTTP layer rather than replacing the client object, and the
-assertions read the bodies the real client produced, headers included.
+What these tests are about is the *sequence* on the wire: a `composing` presence
+carrying the pause it should be held for, then the text, then the presence
+cleared. So the stub sits at the HTTP layer rather than replacing the client
+object, and the assertions read the bodies the real client produced, headers
+included.
 """
 
 from __future__ import annotations

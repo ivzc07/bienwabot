@@ -12,6 +12,8 @@ What comes after go-live is in [the ramp and recovery runbook](ramp-and-recovery
 No secret values live in this file.
 Every credential is a Coolify environment variable, and every command below takes its secrets from the shell rather than from the page.
 
+> **This is the procedure. What was actually done on 2026-07-26, and the three places it differs, is [the go-live record](go-live-record.md).** Most importantly: the live instance is named `bien-dev`, not `bien-rebe`, so read `bien-rebe` below as "the primary instance" rather than as a literal name.
+
 ---
 
 ## 0. Before you start
@@ -271,7 +273,7 @@ The agent pushes about every 60 s from inside its own working loop, so a hung lo
 Attach the Telegram notification to the monitor, with the same bot and chat id, and tick "apply to all existing monitors" only if you actually want that.
 
 Copy the push URL into `KUMA_PUSH_URL`, replacing the public host with the internal one:
-Kuma shows `http://<public>/api/push/<token>`, and what the agent needs is `http://kuma:3001/api/push/<token>`.
+Kuma shows `http://<public>/api/push/<token>`, and what the agent needs is `http://kuma:3001/api/push/<token>` - but only if Kuma is on the shared network, and on this server it is not: the `kuma` service has "Connect to Predefined Network" disabled, so the heartbeat goes out through the proxy at the public host instead ([the record](go-live-record.md), section 2).
 The token is a secret in its own right, because anybody holding it can keep the monitor green while Rebe is dead.
 
 ---

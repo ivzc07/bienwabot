@@ -196,11 +196,10 @@ class Envelope:
 class TypingProfile:
     """How long Rebe appears to type, and how that pause is drawn.
 
-    `maximum_ms` sits below `presence_refresh_seconds` in the shipped numbers, so
-    with the posture as it stands the refresh never fires: no message is slow
-    enough to type. It is written as a loop anyway, because the clamp is a
-    posture decision a ramp or a later spec may widen, while presence expiring
-    after about ten seconds is a property of Baileys that will not move with it.
+    `maximum_ms` has a ceiling it must respect that is not written here: Baileys
+    drops a presence after about ten seconds, and Evolution only re-asserts one
+    it is holding every twenty. A clamp raised past ten seconds would therefore
+    show the group a typing indicator that goes out halfway through the pause.
     """
 
     ms_per_char: float = 30.0
@@ -208,7 +207,6 @@ class TypingProfile:
     minimum_ms: float = 1500.0
     maximum_ms: float = 5000.0
     quiet_thread_ms: float = 3000.0
-    presence_refresh_seconds: float = 8.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,15 +478,15 @@ class Pacer:
         return seconds
 
     async def _type_for(self, chat: str, seconds: float) -> None:
-        """Show `composing`, hold it for `seconds`, refreshing before it expires."""
-        await self._client.send_presence(chat, COMPOSING)
-        remaining = seconds
-        while remaining > _EPSILON:
-            step = min(remaining, self._typing.presence_refresh_seconds)
-            await self._sleeper.sleep(step)
-            remaining -= step
-            if remaining > _EPSILON:
-                await self._client.send_presence(chat, COMPOSING)
+        """Show `composing` for `seconds`.
+
+        One call: Evolution holds the presence for as long as it is told and
+        clears it afterwards, so a loop here would only add flicker between the
+        chunks. The pause is still drawn on this side, which is the part that
+        makes Rebe look human rather than metronomic.
+        """
+        if seconds > _EPSILON:
+            await self._client.send_presence(chat, COMPOSING, seconds)
 
     async def _deliver(
         self, kind: SendKind, chat: str, text: str, waited: float, typing_seconds: float

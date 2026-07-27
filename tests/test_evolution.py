@@ -8,6 +8,7 @@ import pytest
 from rebe_agent.config import load_settings
 from rebe_agent.evolution import (
     COMPOSING,
+    PAUSED,
     EvolutionClient,
     EvolutionError,
     EvolutionRateLimitedError,
@@ -40,17 +41,27 @@ async def test_a_text_goes_to_the_documented_endpoint_and_answers_with_its_id(
     assert call.api_key == API_KEY
 
 
-async def test_presence_goes_out_without_asking_evolution_to_sleep(
+async def test_a_presence_carries_its_hold_in_milliseconds(
     client: EvolutionClient, evolution: FakeEvolution
 ) -> None:
-    """The pause belongs to the pacer, which refreshes this presence while it runs.
-    A `delay` here would hand that timing to an HTTP call nobody can test."""
-    await client.send_presence(GROUP, COMPOSING)
+    """`delay` is required by the endpoint and is how long Evolution holds the
+    presence up. Sending seconds where it wants milliseconds would be a typing
+    indicator that blinks out in three."""
+    await client.send_presence(GROUP, COMPOSING, 3.2)
 
     call = evolution.calls[-1]
     assert call.path == f"/chat/sendPresence/{INSTANCE}"
-    assert call.body == {"number": GROUP, "presence": COMPOSING}
-    assert "delay" not in call.body
+    assert call.body == {"number": GROUP, "presence": COMPOSING, "delay": 3200}
+
+
+async def test_clearing_a_presence_holds_it_for_nothing(
+    client: EvolutionClient, evolution: FakeEvolution
+) -> None:
+    """Nothing waits on the presence that follows a send, but the field is still
+    required, and zero is the truthful value for it."""
+    await client.send_presence(GROUP, PAUSED)
+
+    assert evolution.calls[-1].body == {"number": GROUP, "presence": PAUSED, "delay": 0}
 
 
 async def test_a_reach_out_time_lock_has_its_own_type(evolution: FakeEvolution) -> None:

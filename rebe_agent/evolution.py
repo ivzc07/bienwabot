@@ -6,12 +6,19 @@ Three calls, all from section 3 of `docs/wayfinder/anti-ban-ops-spec.md`:
 - `POST /message/sendText/{instance}` - the message itself.
 - `POST /chat/markMessageAsRead/{instance}` - the blue ticks before a reply.
 
-Evolution's `sendText` can carry `presence` and `delay` and do the typing pause
-for you. This module deliberately does not use that: the playbook wants the
-presence *refreshed* mid-pause (Baileys expires it after about ten seconds) and
-the pause drawn from a jittered distribution the pacer owns. A transport that
-sleeps on our behalf can do neither, and it would put the one timing decision
-that has to be testable behind an HTTP call.
+`sendPresence` cannot be asked to only *set* a presence. Its schema makes `delay`
+required, and the handler always sets the presence, waits that long, and then
+puts the chat back to `paused` - so the hold is Evolution's to execute whatever
+we do. What stays here is the decision: the pacer draws the pause from its
+jittered distribution and passes it down, which is the part that has to be
+testable. Evolution re-asserts the presence itself on holds over twenty seconds;
+`TypingProfile` keeps the clamp well under that, so in practice one call covers
+one pause.
+
+`sendText` can carry the same `presence` and `delay` and fold typing into the
+send. This module still keeps them apart, because the pacer records a send
+before it puts it on the wire and that ordering needs the two to be separate
+calls.
 
 Nothing here knows about ceilings or quiet hours. Failures raised from this
 module mean the message did not get out; a message the *envelope* refused is a
@@ -70,13 +77,13 @@ class EvolutionRateLimitedError(EvolutionError):
 class EvolutionSender(Protocol):
     """What the pacer needs from a transport: type, then send."""
 
-    async def send_presence(self, chat: str, presence: str) -> None:
-        """Set Rebe's presence in `chat` and return, without waiting.
+    async def send_presence(self, chat: str, presence: str, hold_seconds: float = 0.0) -> None:
+        """Show `presence` in `chat` for `hold_seconds`, then let it fall to paused.
 
-        The pacer owns how long the presence is held, and re-asserts it before
-        Baileys expires it, so an implementation that blocked here would be
-        taking a timing decision away from the component that has to be tested
-        on it. Raises `EvolutionError` if the transport will not take it.
+        The call does not return until the hold is over: Evolution runs the wait,
+        because its endpoint offers no way to set a presence and leave it set. The
+        pacer still decides `hold_seconds`, which is the half of this that has to
+        be testable. Raises `EvolutionError` if the transport will not take it.
         """
 
     async def send_text(self, chat: str, text: str) -> str:
@@ -140,15 +147,21 @@ class EvolutionClient:
         if self._owns_client:
             await self._http.aclose()
 
-    async def send_presence(self, chat: str, presence: str) -> None:
-        """Tell the chat that Rebe is typing, paused, or away.
+    async def send_presence(self, chat: str, presence: str, hold_seconds: float = 0.0) -> None:
+        """Tell the chat that Rebe is typing, paused, or away, and hold it.
 
-        No `delay` is sent: the pause belongs to the pacer, which refreshes this
-        presence for as long as the pause lasts.
+        `delay` is required by the endpoint and is in milliseconds; it is how long
+        Evolution keeps the presence up before dropping the chat back to `paused`.
+        A zero hold is the honest value for clearing a presence rather than
+        showing one, and the schema takes it.
         """
         await self._post(
             f"/chat/sendPresence/{self._instance}",
-            {"number": chat, "presence": presence},
+            {
+                "number": chat,
+                "presence": presence,
+                "delay": max(round(hold_seconds * 1000), 0),
+            },
             action=f"set presence {presence!r}",
         )
 
