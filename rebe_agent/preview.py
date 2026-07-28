@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from html.parser import HTMLParser
+from urllib.parse import urljoin
 
 import httpx
 
@@ -66,7 +67,7 @@ async def preview_image_url(http: httpx.AsyncClient, url: str) -> str | None:
     except httpx.HTTPError as exc:
         logger.info("no preview image from %s: %s", url, exc)
         return None
-    return _declared_image(head)
+    return _declared_image(head, url)
 
 
 async def _read_head(response: httpx.Response) -> bytes:
@@ -109,8 +110,14 @@ class _MetaImages(HTMLParser):
             self.twitter_image = content
 
 
-def _declared_image(head: bytes) -> str | None:
-    """The better of the two declarations, or `None` when the page has neither."""
+def _declared_image(head: bytes, page_url: str) -> str | None:
+    """The better of the two declarations, or `None` when the page has neither.
+
+    A relative value is resolved against the page's own address, because the
+    URL is sent to Evolution for WhatsApp's servers to fetch - and they have
+    never heard of the page it came from.
+    """
     images = _MetaImages()
     images.feed(head.decode("utf-8", errors="replace"))
-    return images.og_image or images.twitter_image or None
+    declared = images.og_image or images.twitter_image
+    return urljoin(page_url, declared) if declared else None
