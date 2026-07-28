@@ -15,6 +15,11 @@ Three properties are structural rather than a caller's responsibility:
 3. **Every answer is typed.** Callers ask for a Pydantic model and get a
    validated instance or an exception. There is no path that returns free text
    for a caller to parse, and a response that fails validation is a failure.
+4. **An unusable answer earns one more try.** A 200 with nothing usable in it
+   is how a flaky provider shows up, and on 2026-07-28 that shape cost three
+   tier-one replies in twenty minutes. Every call gets exactly one retry
+   (`MAX_ATTEMPTS`), each attempt reserved and billed against the day's
+   ceiling, so the counter still authorises every request.
 
 Verified against the primary source on 2026-07-25
 ([Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing),
@@ -48,7 +53,7 @@ from typing import Any, TypeVar, cast
 import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel
-from pydantic_ai import Agent
+from pydantic_ai import Agent, UnexpectedModelBehavior
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.profiles import ModelProfile
@@ -72,6 +77,24 @@ THINKING_DISABLED: dict[str, object] = {"thinking": {"type": "disabled"}}
 
 REQUEST_TIMEOUT_SECONDS = 30.0
 """A reply nobody is waiting for is worth less than a thread that comes back."""
+
+MAX_ATTEMPTS = 2
+"""How many times one logical call may reach DeepSeek: a first try and one more.
+
+The retry exists for exactly one failure shape - a 200 whose answer is
+unusable, which on 2026-07-28 cost three tier-one replies in twenty minutes:
+DeepSeek returned whitespace `content` with a handful of tokens billed, while
+the same request minutes later answered fine. A second sample of a flaky
+provider is cheap insurance; a second sample of a hard down one fails the same
+way and the call is no worse off than before. There is no backoff on purpose:
+a wait long enough to ride out a real outage belongs to a redesign of the
+reply path, not to this loop, and the group is not waiting fewer seconds for
+having been made to wait more.
+
+Every attempt reserves and books its own call, so the counter still authorises
+every request that leaves the process - that invariant is why Pydantic AI's
+own retry stays at 0, and the retry here does not weaken it.
+"""
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
@@ -133,11 +156,15 @@ class CallShape:
     within cents - but the room a thinking model needs is not the size of its
     answer.
 
-    Nor is it proportional to it. The cap that matters is the one on the *hardest
-    question of that call type*, and the hardest question is not the longest
-    answer: "are you a bot?" wants one line back and is the most thought this
-    process ever buys. Read these numbers as a thinking budget with an answer
-    attached, not as an answer with headroom.
+    A note on the numbers, so the record is straight: they were raised again on
+    2026-07-28 under a theory the day's own billing data later disproved. Three
+    replies had died of blank answers, and the blame was put on thinking
+    exhausting the cap. The usage table showed 43 completion tokens across all
+    three failed calls - the budget was never touched; DeepSeek was returning
+    whitespace from the first token during a provider-side degradation, and no
+    cap setting addresses that. What does is the one retry every call now gets
+    (`MAX_ATTEMPTS`). The wider caps stay as headroom, but they were never the
+    fix, and a debugger who reads only this file should not be told they were.
     """
 
     max_tokens: int
@@ -157,13 +184,11 @@ CALL_SHAPES: dict[CallType, CallShape] = {
     # 2-3x that estimate because on V4 the cap covers the chain-of-thought too,
     # and 120 truncated a live call mid-answer.
     CallType.REPLY_GATE: CallShape(max_tokens=600, temperature=0.2),
-    # C: the only member-visible prose. Estimated at ~60 tokens, and given 2500
-    # of room, because this is the call that thinks the most for the least. At
-    # 600 two live "eres un bot?" messages in a row came back with a blank
-    # answer - the whole budget spent in `reasoning_content`, `content` left as
-    # whitespace, and a JSON parse that died at column 16 of nothing. A question
-    # about what she is, is exactly the question a thinking model turns over,
-    # and unlike a gate there is no short verdict to land on.
+    # C: the only member-visible prose. Estimated at ~60 tokens, with 2500 of
+    # room as headroom. The 2026-07-28 raise from 600 was made under a theory
+    # the billing data disproved - see the CallShape docstring: the three blank
+    # answers that day were a provider degradation, not an exhausted cap, and
+    # the retry in `MAX_ATTEMPTS` is what addresses them.
     CallType.REPLY_GENERATION: CallShape(max_tokens=2500, temperature=0.9),
     # D: B against an article instead of a chat message. Estimated at ~50 tokens.
     CallType.RELEVANCE_GATE: CallShape(max_tokens=600, temperature=0.2),
@@ -281,10 +306,10 @@ class Brain:
         The cap and the temperature come from the call type's shape rather than
         from the caller, so there is no way to make an uncapped call.
 
-        `retries=0` is what makes "a response that fails schema validation is a
-        failure" true: Pydantic AI would otherwise hand the model its own error
-        and call again, which is a second billed call the counter did not
-        authorise and an answer the caller thinks came first time.
+        `retries=0` keeps Pydantic AI from answering a bad response with a
+        second billed call the counter did not authorise. The one retry a call
+        does get lives here instead - see `MAX_ATTEMPTS` - where every attempt
+        reserves and books its own call before it reaches the wire.
         """
         shape = CALL_SHAPES[call_type]
         settings = OpenAIChatModelSettings(
@@ -293,43 +318,76 @@ class Brain:
             extra_body=dict(THINKING_DISABLED),
         )
 
-        try:
-            reservation = await self._guard.reserve(call_type)
-        except DailyCallCeilingError as exc:
-            raise BrainStoppedError(str(exc)) from exc
+        billed = 0
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                reservation = await self._guard.reserve(call_type)
+            except DailyCallCeilingError as exc:
+                raise BrainStoppedError(str(exc)) from exc
 
-        agent = Agent(
-            self._model,
-            output_type=output_type,
-            instructions=instructions,
-            retries=0,
-        )
-        # Pydantic AI accumulates into this as the run goes, so the tokens
-        # DeepSeek billed are still readable when the run ends in an exception.
-        # A call that fails is a call that cost money; leaving it out of the
-        # totals would understate exactly the days worth understanding.
-        tally = RunUsage()
-        try:
-            result = await agent.run(
-                prompt,
-                model_settings=settings,
-                message_history=list(message_history) if message_history else None,
-                usage=tally,
+            agent = Agent(
+                self._model,
+                output_type=output_type,
+                instructions=instructions,
+                retries=0,
             )
-        except Exception as exc:
-            logger.warning("DeepSeek %s call failed: %s", call_type, _why(exc))
-            # The caller's answer to this is silence - the item is dropped and the
-            # group is told nothing - so the only way anybody learns is the
-            # out-of-band channel. The ceiling above is deliberately not alerted
-            # here: the guard already says the day is spent, in its own words.
-            failure = BrainCallError(f"{call_type} call failed: {_why(exc)}")
-            await self._watch.brain_failed(failure)
-            raise failure from exc
-        finally:
-            if tally.requests:
-                await self._guard.record_usage(reservation, usage_from_run(tally))
+            # Pydantic AI accumulates into this as the run goes, so the tokens
+            # DeepSeek billed are still readable when the run ends in an
+            # exception. A call that fails is a call that cost money; leaving
+            # it out of the totals would understate exactly the days worth
+            # understanding.
+            tally = RunUsage()
+            try:
+                result = await agent.run(
+                    prompt,
+                    model_settings=settings,
+                    message_history=list(message_history) if message_history else None,
+                    usage=tally,
+                )
+            except UnexpectedModelBehavior as exc:
+                unusable = exc
+            except Exception as exc:
+                logger.warning("DeepSeek %s call failed: %s", call_type, _why(exc))
+                # The caller's answer to this is silence - the item is dropped
+                # and the group is told nothing - so the only way anybody learns
+                # is the out-of-band channel. The ceiling above is deliberately
+                # not alerted here: the guard already says the day is spent, in
+                # its own words.
+                failure = BrainCallError(f"{call_type} call failed: {_why(exc)}")
+                await self._watch.brain_failed(failure)
+                raise failure from exc
+            else:
+                return result.output
+            finally:
+                if tally.requests:
+                    await self._guard.record_usage(reservation, usage_from_run(tally))
+                    billed += tally.output_tokens
 
-        return result.output
+            # Only an unusable answer gets the second try, and only once. HTTP
+            # and transport failures took the branch above; a provider that is
+            # down hard does not get asked twice per call.
+            if attempt < MAX_ATTEMPTS:
+                logger.info(
+                    "DeepSeek %s call %d came back unusable; one more try",
+                    call_type,
+                    attempt,
+                )
+                continue
+
+            logger.warning(
+                "DeepSeek %s call failed after %d attempts (%d output tokens billed): %s",
+                call_type,
+                attempt,
+                billed,
+                _why(unusable),
+            )
+            failure = BrainCallError(
+                f"{call_type} call failed after {attempt} attempts: {_why(unusable)}"
+            )
+            await self._watch.brain_failed(failure)
+            raise failure from unusable
+
+        raise AssertionError("the attempt loop always returns or raises")
 
 
 def build_brain(

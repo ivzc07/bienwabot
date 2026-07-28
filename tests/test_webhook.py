@@ -27,7 +27,7 @@ from rebe_agent.sends import InMemorySendLog
 from rebe_agent.signals import LinkWatch, Watchtower
 from rebe_agent.usage import InMemoryUsageStore
 from rebe_agent.webhook import WEBHOOK_PATH, build_app
-from tests.deepseek_stub import FakeDeepSeek
+from tests.deepseek_stub import FakeDeepSeek, json_output_response
 from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import NOON, RecordingAlerter
 from tests.test_config import COMPLETE_ENV
@@ -190,6 +190,19 @@ async def test_the_same_delivery_twice_produces_one_reply(
     await client.post(GOOD, json=payload("by_name"))
 
     assert len(evolution.texts) == 1
+
+
+async def test_a_blank_first_answer_still_earns_the_group_a_reply(
+    settings: Settings, evolution: FakeEvolution, memory: InMemoryGroupMemory
+) -> None:
+    """The 2026-07-28 incident end to end: DeepSeek's first completion comes
+    back blank, the retry answers, and the group gets its reply anyway."""
+    fake = FakeDeepSeek(verdict(), json_output_response(" \n"), wrote())
+    async with make_client(settings, fake, evolution, memory) as client:
+        response = await client.post(GOOD, json=payload("by_name"))
+
+    assert response.status_code == 200
+    assert evolution.texts == [VOICE]
 
 
 @pytest.mark.parametrize(
