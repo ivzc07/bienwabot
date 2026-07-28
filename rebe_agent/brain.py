@@ -14,7 +14,10 @@ Three properties are structural rather than a caller's responsibility:
    type's shape, so a generation bug cannot run long.
 3. **Every answer is typed.** Callers ask for a Pydantic model and get a
    validated instance or an exception. There is no path that returns free text
-   for a caller to parse, and a response that fails validation is a failure.
+   for a caller to parse, and a response that fails validation is a failure -
+   with one bounded exception: when the schema is a single text field and only
+   the JSON envelope around it is broken, the answer inside is recovered and
+   validated (`_recover`), because the envelope carries nothing the schema does.
 4. **An unusable answer earns one more try.** A 200 with nothing usable in it
    is how a flaky provider shows up, and on 2026-07-28 that shape cost three
    tier-one replies in twenty minutes. Every call gets exactly one retry
@@ -46,15 +49,16 @@ month conclusion stands unchanged.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, TypeVar, cast
 
 import httpx
 from openai import AsyncOpenAI
-from pydantic import BaseModel
-from pydantic_ai import Agent, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelMessage
+from pydantic import BaseModel, ValidationError
+from pydantic_ai import Agent, UnexpectedModelBehavior, capture_run_messages
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.deepseek import DeepSeekProvider
@@ -141,6 +145,110 @@ def _why(exc: BaseException) -> str:
 def _clip(detail: str, limit: int = 600) -> str:
     collapsed = " ".join(detail.split())
     return collapsed if len(collapsed) <= limit else f"{collapsed[:limit]}..."
+
+
+def _unusable_shape(messages: Sequence[ModelMessage]) -> str:
+    """What the model actually sent, for the answer that would not parse.
+
+    `_why` reports the exception chain, and on a blank answer that chain says
+    only `Invalid JSON: EOF while parsing` over an input of `' '` - true, and
+    useless. It cannot say whether the body was empty because the provider
+    stopped early, because a filter refused, or because the whole generation
+    went into `reasoning_content` where the parser never looks.
+
+    The answer to all three is in the response object Pydantic AI already
+    built, so this reads it back off the captured run: the provider's own
+    `finish_reason`, the length and opening characters of every part, and the
+    provider details beside them. Lengths are reported because the distinction
+    that matters most here - nothing at all versus a single space - does not
+    survive being trimmed into a log line.
+    """
+    responses = [m for m in messages if isinstance(m, ModelResponse)]
+    if not responses:
+        return "no response was captured"
+
+    last = responses[-1]
+    fields = [f"finish_reason={last.finish_reason!r}"]
+    if last.provider_details:
+        fields.append(f"provider_details={last.provider_details}")
+    if not last.parts:
+        fields.append("parts=none")
+    for part in last.parts:
+        content = getattr(part, "content", None)
+        if isinstance(content, str):
+            fields.append(f"{part.part_kind}[{len(content)}]={content!r}")
+        else:
+            fields.append(f"{part.part_kind}={content!r}")
+    return _clip(" ".join(fields))
+
+
+_ENVELOPE_PREFIX = re.compile(r'\s*\{\s*"((?:\\.|[^"\\])*)"\s*:\s*')
+"""The opening of a JSON object envelope, `{"<key>":` - how a broken one is recognised."""
+
+
+def _json_invalid_body(exc: BaseException) -> str | None:
+    """The text DeepSeek sent, when `exc` is a broken-JSON answer and nothing else.
+
+    The chain under `Exceeded maximum output retries` holds a `ValidationError`
+    whose `json_invalid` error carries the body as its input. Any other failure
+    - a valid envelope with the wrong types in it, a transport error - has no
+    such error, and there is nothing here to recover from.
+    """
+    seen: set[int] = set()
+    cause: BaseException | None = exc
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, ValidationError):
+            for error in cause.errors():
+                if error["type"] == "json_invalid" and isinstance(error["input"], str):
+                    return error["input"]
+        cause = cause.__cause__ or cause.__context__
+    return None
+
+
+def _recover(exc: BaseException, output_type: type[OutputT]) -> OutputT | None:
+    """The answer out of a broken JSON envelope, when there is exactly one to recover.
+
+    On 2026-07-28 a news_summary call died as `Invalid JSON` over
+    `{"text":":"ya leiste..."}`: DeepSeek's JSON mode opened the value string,
+    wrote a lone `:` where the post was meant to begin, closed the string, and
+    wrote the whole post as bare text after it - the same way on the retry. The
+    post was lost though every word of it had arrived. The envelope carries
+    nothing a one-field schema needs: the rules on the text itself live
+    downstream (`render`, the reply checks) and run unchanged on a recovered
+    answer.
+
+    Bounded on purpose. Only a model of a single `str` field qualifies - with
+    two strings, which was which is guesswork, and a guessed answer is worse
+    than a dropped call. Only a `json_invalid` failure qualifies. And only a
+    *complete* envelope - key, colon, and a closing brace - holds a whole
+    answer: a blank or truncated generation is a fragment, and recovering a
+    fragment would be inventing the rest. What sits between the key and the
+    closing brace is the answer, minus the broken quoting at its edges; it is
+    validated like any other answer before it is returned.
+    """
+    fields = output_type.model_fields
+    if len(fields) != 1:
+        return None
+    ((name, field),) = fields.items()
+    if field.annotation is not str:
+        return None
+    body = _json_invalid_body(exc)
+    if body is None:
+        return None
+    prefix = _ENVELOPE_PREFIX.match(body)
+    if prefix is None or prefix.group(1) != name:
+        return None
+    middle = body[prefix.end() :].rstrip()
+    if not middle.endswith("}"):
+        return None
+    text = middle[:-1].strip(' \t\r\n":')
+    if not text:
+        return None
+    try:
+        return output_type.model_validate({name: text})
+    except ValidationError:
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,14 +446,25 @@ class Brain:
             # understanding.
             tally = RunUsage()
             try:
-                result = await agent.run(
-                    prompt,
-                    model_settings=settings,
-                    message_history=list(message_history) if message_history else None,
-                    usage=tally,
-                )
+                with capture_run_messages() as exchange:
+                    result = await agent.run(
+                        prompt,
+                        model_settings=settings,
+                        message_history=list(message_history) if message_history else None,
+                        usage=tally,
+                    )
             except UnexpectedModelBehavior as exc:
                 unusable = exc
+                # The exception says the answer did not parse; this says what
+                # the answer was. Logged per attempt rather than once at the
+                # end, because two attempts can fail differently and the pair
+                # is the evidence.
+                logger.warning(
+                    "DeepSeek %s call %d came back unusable: %s",
+                    call_type,
+                    attempt,
+                    _unusable_shape(exchange),
+                )
             except Exception as exc:
                 logger.warning("DeepSeek %s call failed: %s", call_type, _why(exc))
                 # The caller's answer to this is silence - the item is dropped
@@ -373,6 +492,20 @@ class Brain:
                     attempt,
                 )
                 continue
+
+            # The retry has spoken: the provider glitched the same way twice.
+            # If the only thing broken is the JSON envelope around a single
+            # text field, the answer inside is still the answer - recover it
+            # rather than drop a post the group never got to see. Anything
+            # else falls through to the failure below, as before.
+            recovered = _recover(unusable, output_type)
+            if recovered is not None:
+                logger.info(
+                    "DeepSeek %s call answered in a broken JSON envelope; "
+                    "recovered the answer inside",
+                    call_type,
+                )
+                return recovered
 
             logger.warning(
                 "DeepSeek %s call failed after %d attempts (%d output tokens billed): %s",

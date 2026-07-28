@@ -22,6 +22,7 @@ def json_output_response(
     usage: dict[str, int] | None = None,
     model: str = "deepseek-v4-flash",
     reasoning: str | None = None,
+    finish_reason: str = "stop",
 ) -> dict[str, Any]:
     """A DeepSeek chat completion answering with a JSON object in `content`.
 
@@ -29,7 +30,9 @@ def json_output_response(
     `json_object` and the schema rides in the instructions - so this is the shape
     a real successful structured call comes back in. `reasoning` fills the field
     a thinking model puts its chain-of-thought in, which is beside the answer and
-    never part of it.
+    never part of it. `finish_reason` is the provider's own word for why the
+    generation ended - `stop`, `length`, a filter - and a blank answer is only
+    diagnosable when it is preserved.
     """
     message: dict[str, Any] = {"role": "assistant", "content": body}
     if reasoning is not None:
@@ -39,7 +42,7 @@ def json_output_response(
         "object": "chat.completion",
         "created": 1_785_000_000,
         "model": model,
-        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+        "choices": [{"index": 0, "finish_reason": finish_reason, "message": message}],
         "usage": usage
         if usage is not None
         else {

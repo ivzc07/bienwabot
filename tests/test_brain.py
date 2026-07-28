@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from pydantic import BaseModel
 
+from rebe_agent import news
 from rebe_agent.brain import (
     CALL_SHAPES,
     DEEPSEEK_MODEL,
@@ -420,3 +423,162 @@ async def test_a_stopped_day_makes_no_request_at_all(
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
 
     assert fake.requests == []
+
+
+def unusable_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The per-attempt WARNING lines the brain logs for an answer that will not parse."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "rebe_agent.brain" and "came back unusable:" in record.getMessage()
+    ]
+
+
+async def test_a_blank_answer_is_logged_with_finish_reason_and_exact_content(
+    settings: Settings, store: InMemoryUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The 12:44 reply died as `Invalid JSON` over an input of `' '` and the log
+    could not say why. The per-attempt line has to carry the provider's own
+    `finish_reason` and the content as it arrived - quoted, so a space is visible,
+    and with its length, so one space and none are not the same line."""
+    fake = FakeDeepSeek(json_output_response(" \n", finish_reason="length"))
+
+    with (
+        caplog.at_level(logging.WARNING, logger="rebe_agent.brain"),
+        pytest.raises(BrainCallError),
+    ):
+        await brain_for(settings, fake, store).ask(CallType.REPLY_GENERATION, "contesta", NewsPost)
+
+    lines = unusable_warnings(caplog)
+    assert len(lines) == 2  # one per attempt, not just once at the end
+    for line in lines:
+        assert "finish_reason='length'" in line
+        assert "text[2]=' \\n'" in line
+
+
+async def test_a_reasoning_only_answer_is_logged_apart_from_an_empty_one(
+    settings: Settings, store: InMemoryUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A body that is blank because the whole generation went into
+    `reasoning_content` needs a different fix than a body that is blank because
+    the provider sent nothing, so the two must not log as the same shape."""
+    thinking_fake = FakeDeepSeek(json_output_response("", reasoning="Let me think about this."))
+    with (
+        caplog.at_level(logging.WARNING, logger="rebe_agent.brain"),
+        pytest.raises(BrainCallError),
+    ):
+        await brain_for(settings, thinking_fake, store).ask(
+            CallType.REPLY_GENERATION, "contesta", NewsPost
+        )
+    thinking_lines = unusable_warnings(caplog)
+    assert thinking_lines
+    for line in thinking_lines:
+        assert "thinking[24]='Let me think about this.'" in line
+        assert "text[" not in line
+
+    caplog.clear()
+    empty_fake = FakeDeepSeek(json_output_response(" "))
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, empty_fake, store).ask(
+            CallType.REPLY_GENERATION, "contesta", NewsPost
+        )
+    empty_lines = unusable_warnings(caplog)
+    assert empty_lines
+    for line in empty_lines:
+        assert "text[1]=' '" in line
+        assert "thinking[" not in line
+
+
+async def test_the_unusable_shape_line_stays_bounded(
+    settings: Settings, store: InMemoryUsageStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The line quotes what the model sent, and the model can send an essay.
+    The length survives the cut - it rides in front of the content - but the
+    content itself does not."""
+    fake = FakeDeepSeek(json_output_response("x" * 5000))
+
+    with (
+        caplog.at_level(logging.WARNING, logger="rebe_agent.brain"),
+        pytest.raises(BrainCallError),
+    ):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    lines = unusable_warnings(caplog)
+    assert lines
+    for line in lines:
+        assert "text[5000]=" in line
+        assert len(line) < 700
+        assert line.endswith("...")
+
+
+MANGLED_NEWS_BODY = '{"text":":"ya leiste sobre DeltaNet y sus variantes de atencion lineal?"}'
+"""The 2026-07-28 incident body, verbatim from the production log.
+
+DeepSeek's JSON mode opened the value string, wrote a lone `:` where the post
+was meant to begin (and the inverted question mark was never written), closed
+the string, and wrote the whole post as bare text after it. `finish_reason`
+was `stop` and every word of the answer arrived inside the broken envelope.
+"""
+
+
+async def test_an_answer_inside_a_broken_envelope_is_recovered(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """A news_summary call died on 2026-07-28 as `Invalid JSON` over
+    `MANGLED_NEWS_BODY`, on both attempts, and the post was lost though every
+    word of it had arrived. The envelope is not the answer: when the schema is
+    one text field and the JSON around it is broken, the text is recovered and
+    validated, and the run keeps its post.
+
+    The real `NewsPost` rather than the stand-in above, because the field count
+    is exactly what this behaviour turns on."""
+    fake = FakeDeepSeek(json_output_response(MANGLED_NEWS_BODY))
+
+    post = await brain_for(settings, fake, store).ask(
+        CallType.NEWS_SUMMARY, "resume esto", news.NewsPost
+    )
+
+    assert post.text == "ya leiste sobre DeltaNet y sus variantes de atencion lineal?"
+
+
+async def test_a_clean_second_sample_wins_over_a_recovered_first(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The retry exists because a fresh sample of a flaky provider is cheap
+    insurance; recovery is for when the fresh sample glitches the same way,
+    never a reason to skip asking again."""
+    fake = FakeDeepSeek(
+        json_output_response(MANGLED_NEWS_BODY),
+        json_output_response('{"text": "ojo con DeltaNet y la atencion lineal"}'),
+    )
+
+    post = await brain_for(settings, fake, store).ask(
+        CallType.NEWS_SUMMARY, "resume esto", news.NewsPost
+    )
+
+    assert post.text == "ojo con DeltaNet y la atencion lineal"
+
+
+async def test_a_broken_envelope_for_a_multi_field_answer_still_fails(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """Recovery reads the one field there is. With more than one, which string
+    was which is guesswork, and a guessed answer is worse than a dropped call."""
+    fake = FakeDeepSeek(
+        json_output_response('{"framing":":"Ojo", "line": "Sale.", "url": "https://x.mx/a"}')
+    )
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+
+async def test_a_broken_envelope_without_the_answer_inside_still_fails(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """A truncated generation holds no complete string to recover - the key is
+    the only literal - so the call fails as before. Recovery is for answers
+    that arrived, not for inventing ones that did not."""
+    fake = FakeDeepSeek(json_output_response('{"text":"ya leiste'))
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", news.NewsPost)
