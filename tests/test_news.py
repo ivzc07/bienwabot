@@ -34,6 +34,7 @@ from rebe_agent.news import (
 )
 from rebe_agent.pacer import Envelope, Pacer, SendRefusedError
 from rebe_agent.posted import InMemoryPostedStore
+from rebe_agent.preview import PreviewLookup
 from rebe_agent.sends import InMemorySendLog, SendKind
 from rebe_agent.usage import CallType, InMemoryUsageStore
 from rebe_agent.voice import emoji_count
@@ -133,9 +134,10 @@ def make_leg(
     candidates: StubCandidates,
     *,
     envelope: Envelope | None = None,
+    preview: PreviewLookup | None = None,
 ) -> NewsLeg:
     pacer = make_pacer(evolution, clock, envelope=envelope)
-    return NewsLeg(make_brain(settings, fake), pacer, candidates, posted, clock)
+    return NewsLeg(make_brain(settings, fake), pacer, candidates, posted, clock, preview=preview)
 
 
 # --- the post the group sees -------------------------------------------------
@@ -267,6 +269,45 @@ async def test_one_run_puts_one_curated_item_in_the_group(
         "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
     ]
     assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
+
+
+async def test_an_item_whose_page_has_an_image_goes_out_as_a_photo(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """The headline of the ticket: the post carries a picture of the story, and
+    her words plus the link ride along as the caption - the link stays, because
+    it is how anyone reads the article."""
+    image = "https://openai.com/og/local-model.png"
+    looked_up: list[str] = []
+
+    async def preview(url: str) -> str | None:
+        looked_up.append(url)
+        return image
+
+    fake = FakeDeepSeek(answer())
+    leg = make_leg(
+        settings, fake, evolution, posted, clock, StubCandidates(LAUNCH), preview=preview
+    )
+
+    sent = await leg.run(GROUP)
+
+    assert [post.item for post in sent] == [LAUNCH]
+    assert looked_up == ["https://openai.com/index/local-model"], "the article's own link"
+    assert evolution.shape == ["composing", "media", "paused"]
+    assert evolution.medias == [
+        {
+            "number": GROUP,
+            "mediatype": "image",
+            "media": image,
+            "caption": "miren, salio un modelo que corre sin nube\n"
+            "https://openai.com/index/local-model",
+        }
+    ]
+    # The store keeps recording her words only, exactly as with a text post.
+    assert [row.text for row in posted.items] == ["miren, salio un modelo que corre sin nube"]
 
 
 async def test_every_call_carries_the_persona(
