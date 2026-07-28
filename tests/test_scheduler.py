@@ -818,9 +818,7 @@ async def test_a_due_slot_drives_the_news_leg_all_the_way_into_the_group(
         url="https://openai.com/index/local-model",
         published_at=at(time(7, 30)),
     )
-    fake = FakeDeepSeek(
-        json_output_response('{"opener": "miren", "line": "salio un modelo que corre local"}')
-    )
+    fake = FakeDeepSeek(json_output_response('{"text": "miren, salio un modelo que corre local"}'))
 
     class OnePool:
         async def fetch(self, now: datetime) -> Sequence[object]:
@@ -847,7 +845,7 @@ async def test_a_due_slot_drives_the_news_leg_all_the_way_into_the_group(
     await scheduler.step()
 
     assert evolution.texts == [
-        "miren salio un modelo que corre local\nhttps://openai.com/index/local-model"
+        "miren, salio un modelo que corre local\nhttps://openai.com/index/local-model"
     ]
     plan = await plans.plan_on(WEDNESDAY)
     assert plan is not None

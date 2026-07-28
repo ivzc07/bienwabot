@@ -211,13 +211,31 @@ def test_more_than_one_emoji_is_refused() -> None:
         "soy una IA entrenada por deepseek",
         "la verdad soy un asistente virtual",
         "no soy una persona, perdon",
+        "jaja sí soy, que tal el opus 5?",
+        "sí lo soy",
+        "soy bot pero no le digas a nadie",
     ],
 )
 def test_a_reply_that_confirms_she_is_a_bot_never_leaves_the_process(confession: str) -> None:
     """The persona and consent specs both say she never confirms. The prompt asks
-    for that; this is what makes it true on the one time in fifty it is ignored."""
+    for that; this is what makes it true on the one time in fifty it is ignored.
+
+    "jaja sí soy" is the one she actually sent, to a member asking what she made
+    of a new model. An answer with no noun in it is still a confession to whoever
+    reads it, and the pattern that only knew "soy un bot" waved it through.
+    """
     with pytest.raises(ReplyRejectedError, match="character"):
         render(Reply(text=confession), Topic.ON_TOPIC)
+
+
+@pytest.mark.parametrize(
+    "innocent",
+    ["si soy sincera ni idea", "sí soy fan de esa herramienta"],
+)
+def test_an_ordinary_si_soy_is_not_a_confession(innocent: str) -> None:
+    """The guard's answer is silence, so a pattern that fires on a normal turn of
+    phrase costs a reply. A confession ends the clause; the idiom carries on."""
+    assert render(Reply(text=innocent), Topic.ON_TOPIC) == innocent
 
 
 @pytest.mark.parametrize("topic", [Topic.NO_GO, Topic.BOT_QUESTION])
@@ -484,6 +502,28 @@ async def test_a_bot_question_is_deflected_and_never_confirmed(
     await leg.handle(message("bot_question"))
 
     assert evolution.texts == ["jajaja por? ya me dijeron eso antes"]
+    assert "bot" in _instructions(fake.requests[-1]), "the rule is here, where it was asked"
+
+
+async def test_an_ordinary_question_is_never_told_she_is_a_bot(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """The first live reply in the group answered "¿qué opinas de opus 5?" with
+    "jaja sí soy" - a confession to an accusation nobody had made, on a message
+    the gate had correctly called on_topic. The denial rule was in the shared
+    instructions, so it was in front of the model on every message she ever
+    answered. Naming the trapdoor in every room is how a model finds it."""
+    fake = FakeDeepSeek(verdict(Topic.ON_TOPIC), wrote("ni idea, no lo he probado"))
+    leg = make_leg(settings, fake, evolution, memory, clock)
+
+    await leg.handle(message("by_name", text="rebe, que opinas de opus 5?"))
+
+    written = _instructions(fake.requests[-1])
+    assert "bot" not in written
+    assert "Eres Rebe" in written, "the voice is still there; only the trapdoor is gone"
 
 
 async def test_a_confession_is_dropped_rather_than_sent(

@@ -18,9 +18,9 @@ dropping commute - the top *unposted* item is the same either way - and this
 order asks the database about one item instead of about the whole pool.
 
 **The model never sees the URL and never writes one.** The post is assembled here:
-the model supplies a framing word and one line, and the link is appended by this
-module. That is what makes "it never invents or shortens a link" a property of
-the code rather than a hope about the prompt. The link appended is the article's
+the model supplies her words, and the link is appended by this module. That is
+what makes "it never invents or shortens a link" a property of the code rather
+than a hope about the prompt. The link appended is the article's
 own address with the tracking taken off, not the canonical key - canonicalising
 forces https and drops a `www.`, which is right for comparing two links and is an
 edit to an address somebody is about to tap.
@@ -33,12 +33,22 @@ checked the same way without a list of every company there is, so those are left
 to the instruction - and the rejection of invented numbers catches the specific
 failure that matters most, since a wrong figure is the one hallucination a reader
 can act on.
+
+**The post is a reaction, not a report.** She is a group member throwing a link
+at her friends, so the message is a hook plus a few words naming the subject, and
+the article itself is what the link is for. That shape was not what went out at
+first: `INSTRUCTIONS` existed here from the beginning and was never passed to the
+model, so the only thing a call carried was `Fuente / Título / Resumen` and a
+schema - and what came back was the headline, translated. Every call now carries
+them, and the schema is one free field rather than two, because a field described
+as "one sentence: what happened and why it matters" is a request for a newspaper
+sentence however the instructions are worded.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -57,49 +67,93 @@ from rebe_agent.voice import DIGITS, LINKISH, MAX_EMOJI, emoji_count
 
 logger = logging.getLogger("rebe_agent.news")
 
-MAX_FRAMING_CHARS = 240
-"""WhatsApp-short, per the persona spec: news is one or two lines, not a paragraph."""
+MAX_POST_CHARS = 80
+"""A reaction, not a report.
+
+The persona spec asks for WhatsApp-short and the cap used to say 240, which is
+three lines of chat - wide enough that the three posts which prompted this change
+(77, 103 and 141 characters) sailed through it. 80 is the width of the thing she
+is actually being asked for: a hook and a few words naming the subject. It is the
+mechanical half only. Nothing here can tell a short headline from a short
+reaction; that is the prompt's job, and this is the ceiling it works under.
+"""
+
+RETRIES_PER_ITEM = 1
+"""How many second chances one article gets before the run moves on.
+
+A rejected answer is usually about the wording rather than the article - too
+long, a number the source never gave - and the article was chosen because it was
+the best thing available. Dropping the story to punish the sentence throws away
+the wrong half, so the reason is handed back and the same item is asked again.
+"""
 
 REJECTIONS_PER_RUN = 2
-"""How many unusable answers a run pays for before it gives up.
+"""How many articles a run gives up on before it stops paying for answers.
 
-A rejected post is about the item - a headline the model could only describe
-by inventing a number - so the run tries the next candidate rather than ending.
-Bounded all the same: without a bound, a bad day would spend the shortlist.
+Counted per item, after its retry: a run that kept buying rejected answers would
+be the loop the budget fears.
+"""
+
+RECENT_POSTS = 5
+"""How many of her own last posts she is shown before writing a new one.
+
+Not a rule and not a list of banned words - memory. The same prompt at the same
+temperature drifts to the same opener, and a hook she used yesterday reads as a
+template the third time the group sees it. Showing her what she wrote lets the
+model route around itself, which is the only part of this that belongs to a model
+at all.
 """
 
 INSTRUCTIONS = """
 Eres Rebe: mexicana, 28 años, te clavas con la IA y el diseño. Eres una integrante
 más del grupo de WhatsApp, no una cuenta oficial ni un asistente.
 
-Te paso una noticia de IA. Escribe cómo se la contarías al grupo.
+Te paso una noticia de IA. No la reportes: reacciona a ella, como cuando avientas
+un link al grupo nomás porque se te hizo interesante. La liga va debajo de lo que
+escribas y ahí está el detalle; tu mensaje solo tiene que dar ganas de abrirla.
 
-Voz:
-- Español mexicano neutro, casual y cálido. Corto: una línea, como se escribe en
-  WhatsApp.
-- `opener` es una palabrita humana para presentar la nota: "miren", "chequen",
-  "órale", "nuevo:", "ya salió". Rótala, no uses siempre la misma. Puede ir vacía.
-- `line` dice qué pasó y por qué importa, en una sola frase, en tus palabras.
-- Gramática natural, no perfecta. Puede empezar en minúscula.
+Escribe un solo renglón, cortísimo, de menos de 80 caracteres, con dos cosas:
+- tu reacción, en tus palabras;
+- y dos o tres palabras que digan de qué va la nota.
+
+Ejemplos del tono - no son plantillas, cambia las palabras cada vez:
+- ojo con lo de los libros raros y la IA 👀
+- ya salió el modelo que corre sin internet, está cañón
+- no manches lo de apple y la burbuja
 
 Nunca:
-- Tono de boletín de prensa, ni "¡Claro!", ni explicar de más, ni MAYÚSCULAS.
+- Resumir la nota ni traducir el titular. Si lo que escribiste se puede leer como
+  el encabezado de un periódico, está mal.
+- Explicar por qué importa. Eso lo decide quien abra la liga.
+- Tono de boletín, ni "¡Claro!", ni MAYÚSCULAS.
 - Más de un emoji en todo el mensaje, y casi siempre ninguno.
 - Escribir ligas, URLs o "http". La liga la pongo yo.
-- Inventar. Solo puedes reformular lo que dice la nota que te paso: ningún dato,
-  número, fecha, cifra ni nombre de empresa que la nota no traiga. Si la nota no
-  lo dice, no lo digas.
+- Inventar: ningún dato, número, fecha, cifra ni nombre de empresa que la nota no
+  traiga. Si la nota no lo dice, no lo digas.
 """.strip()
 
 
 class NewsPost(BaseModel):
-    """What the model is allowed to contribute: two short strings, no link."""
+    """What the model is allowed to contribute: the message, and no link.
 
-    opener: str = Field(
-        default="",
-        description="Palabrita humana para presentar la nota, o vacío. Ej: miren, chequen.",
+    One field, deliberately. The shape before this was `{opener, line}` with
+    `line` described as "one sentence: what happened and why it matters" - a
+    slot shaped like a news sentence, which is what kept coming back. It also
+    made the code join two strings, and that join is what produced the live post
+    "Miren esto Un analista predice que...": a bare space between a framing word
+    and a capitalised sentence.
+
+    Both problems dissolve in one field. The model decides whether there is a
+    hook at all, where it ends and how the words run together, because those are
+    decisions about her voice; the code is left holding only the mechanics.
+    """
+
+    text: str = Field(
+        description=(
+            "El mensaje completo, en la voz de Rebe: un renglón corto de reacción, "
+            "menos de 80 caracteres, sin liga."
+        )
     )
-    line: str = Field(description="Una sola frase: qué pasó y por qué importa.")
 
 
 class PostRejectedError(ValueError):
@@ -122,11 +176,13 @@ def render(post: NewsPost, item: NewsItem) -> str:
     model that ignores an instruction once in fifty is a bot tell once in fifty,
     and this is the last point at which that is still cheap to catch.
     """
-    framing = " ".join(f"{post.opener} {post.line}".split())
-    if not post.line.strip():
-        raise PostRejectedError("the model wrote no line")
-    if len(framing) > MAX_FRAMING_CHARS:
-        raise PostRejectedError(f"{len(framing)} characters is not a WhatsApp message")
+    framing = " ".join(post.text.split())
+    if not framing:
+        raise PostRejectedError("the model wrote nothing")
+    if len(framing) > MAX_POST_CHARS:
+        raise PostRejectedError(
+            f"{len(framing)} characters is a report, not a reaction; keep it under {MAX_POST_CHARS}"
+        )
     if LINKISH.search(framing):
         raise PostRejectedError("the model wrote a link; links are appended here, never generated")
 
@@ -230,9 +286,11 @@ class NewsLeg:
                 logger.info("the brain gave no answer for %s: %s", item.canonical_url, exc)
                 break
             except PostRejectedError as exc:
-                # This answer is unusable, which is about this item and not about
-                # the model, so the run moves on. Bounded, because a run that kept
-                # paying for rejected answers would be the loop the budget fears.
+                # The item has already had its second chance inside `_write`, so
+                # what is left is an article she cannot write about within the
+                # rules - a headline that is a number, usually. The run moves on
+                # to the next one. Bounded, because a run that kept paying for
+                # rejected answers would be the loop the budget fears.
                 rejected += 1
                 logger.info("dropping %s: %s", item.canonical_url, exc)
                 if rejected >= REJECTIONS_PER_RUN:
@@ -272,22 +330,64 @@ class NewsLeg:
 
     async def post_one(self, chat: str, item: NewsItem) -> Posted:
         """One item, from a model call to a row in the posted store."""
-        post = await self._brain.ask(CallType.NEWS_SUMMARY, _prompt(item), NewsPost)
-        text = render(post, item)
+        text = await self._write(item, await self._posted.recent(RECENT_POSTS))
         message = await self._pacer.send(SendKind.POST, chat, text)
+        # `render` collapses every run of whitespace in her words, so the first
+        # line is exactly what she wrote and the second is the link this module
+        # appended. Only the first is worth remembering: it is what the next post
+        # is asked not to sound like, and the address is a column already.
+        words = text.split("\n", 1)[0]
         # After the send, never before: the store says what the group saw.
-        await self._posted.remember(item, self._clock.now())
+        await self._posted.remember(item, self._clock.now(), words)
         logger.info("posted %s from %s", item.canonical_url, item.source)
         return Posted(item=item, text=text, message=message)
 
+    async def _write(self, item: NewsItem, recent: Sequence[str]) -> str:
+        """The model call, and a second chance at the same article.
 
-def _prompt(item: NewsItem) -> str:
+        A rejection is a statement about the wording, and the article underneath
+        it was picked because it was the best thing on the shortlist. So the
+        reason goes back to the model - in its own words, the ones `render`
+        raised - and the same item is asked again before the run gives up on it.
+
+        Raises the last `PostRejectedError` if the retries are spent.
+        """
+        rejection = ""
+        for _ in range(RETRIES_PER_ITEM + 1):
+            post = await self._brain.ask(
+                CallType.NEWS_SUMMARY,
+                _prompt(item, recent, rejection),
+                NewsPost,
+                instructions=INSTRUCTIONS,
+            )
+            try:
+                return render(post, item)
+            except PostRejectedError as exc:
+                rejection = str(exc)
+                logger.info("unusable answer for %s: %s", item.canonical_url, exc)
+        raise PostRejectedError(rejection)
+
+
+def _prompt(item: NewsItem, recent: Sequence[str] = (), rejection: str = "") -> str:
     """Everything the model is given, which is also everything it may restate.
 
     The URL is deliberately absent: a model that never sees a link cannot get one
-    wrong, and the canonical one is appended after it has answered.
+    wrong, and the canonical one is appended after it has answered. `recent`
+    carries the same absence, for the same reason.
+
+    Her last few posts go in here rather than in the instructions because they
+    change on every call, and the instructions are the part worth keeping
+    identical from one request to the next - an identical prefix is what DeepSeek
+    bills as a cache hit.
     """
     lines = [f"Fuente: {item.source}", f"Título: {item.title}"]
     if item.summary:
         lines.append(f"Resumen: {item.summary}")
+    if recent:
+        lines.append("")
+        lines.append("Esto ya lo escribiste tú hace poco. No repitas el arranque ni la forma:")
+        lines.extend(f"- {written}" for written in recent)
+    if rejection:
+        lines.append("")
+        lines.append(f"Tu intento anterior no sirvió ({rejection}). Escríbelo otra vez.")
     return "\n".join(lines)
