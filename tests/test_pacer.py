@@ -624,6 +624,23 @@ async def test_the_same_wording_twice_in_a_row_is_refused(
     assert evolution.calls == []
 
 
+async def test_the_repeat_rule_reads_the_caption_not_the_picture(
+    pacer: Pacer, evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock
+) -> None:
+    """The fingerprint is taken from the caption, because the caption is the
+    wording a reader scrolls past - a different image under the same words is
+    the same message twice."""
+    await seed_send(log, clock.now() - timedelta(minutes=20), kind=SendKind.POST, text=CAPTION)
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send_photo(
+            SendKind.POST, GROUP, "https://openai.com/og/a-different-image.png", CAPTION
+        )
+
+    assert refused.value.reason is RefusalReason.DUPLICATE
+    assert evolution.calls == []
+
+
 async def test_spacing_and_case_do_not_make_it_a_different_message(
     pacer: Pacer, log: InMemorySendLog, clock: ManualClock
 ) -> None:
