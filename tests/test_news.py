@@ -337,6 +337,39 @@ async def test_an_item_whose_page_has_no_image_goes_out_as_text(
     assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
 
 
+async def test_a_photo_whatsapp_cannot_fetch_falls_back_to_the_text_post(
+    settings: Settings,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """WhatsApp fetches the image itself, so an image it cannot fetch - a 404,
+    a hotlink block, a file too large - is only discovered at send time. A
+    picture we could not send must never cost the post, exactly like a picture
+    we could not find: her words and the link still go out, as text."""
+    broken = FakeEvolution()
+    broken.media_status = 500
+    image = "https://openai.com/og/hotlink-blocked.png"
+
+    async def preview(url: str) -> str | None:
+        return image
+
+    fake = FakeDeepSeek(answer())
+    leg = make_leg(settings, fake, broken, posted, clock, StubCandidates(LAUNCH), preview=preview)
+
+    sent = await leg.run(GROUP)  # must not raise
+
+    assert [post.item for post in sent] == [LAUNCH]
+    assert len(broken.medias) == 1, "one photo attempt, not a retry loop"
+    # One typing pause for one message: the fallback is the same send degraded,
+    # not a second message, so the group does not watch her "type" twice.
+    assert broken.shape == ["composing", "media", "text", "paused"]
+    assert broken.texts == [
+        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+    ]
+    assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
+    assert [row.text for row in posted.items] == ["miren, salio un modelo que corre sin nube"]
+
+
 async def test_every_call_carries_the_persona(
     settings: Settings,
     evolution: FakeEvolution,

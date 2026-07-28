@@ -70,6 +70,9 @@ class FakeEvolution:
         self.text_status: int | None = None
         """Set to fail only the send, leaving presence working."""
 
+        self.media_status: int | None = None
+        """Set to fail only the media send, leaving presence and text working."""
+
         self.read_status: int | None = None
         """Set to fail only the read receipt, leaving the send working."""
 
@@ -106,6 +109,8 @@ class FakeEvolution:
         status = self.status
         if TEXT_PATH in path and self.text_status:
             status = self.text_status
+        elif MEDIA_PATH in path and self.media_status:
+            status = self.media_status
         elif READ_PATH in path and self.read_status:
             status = self.read_status
         if status >= 400:

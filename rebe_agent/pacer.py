@@ -274,9 +274,19 @@ class Pacer:
         The caption plays the text's part everywhere the envelope reads the
         wording - the typing pause is drawn from its length and the repeat rule
         fingerprints it - because the caption is what a reader scrolls past.
+
+        A photo Evolution will not take degrades to its caption as a plain
+        text: WhatsApp fetches the image itself, so an unfetchable one is only
+        discovered here, at send time, and a picture that cannot go out must
+        not cost the message it decorates. A caption that *also* fails raises
+        like any text send - a broken transport is not a missing picture.
         """
         return await self._send(
-            kind, chat, caption, lambda: self._client.send_media(chat, image_url, caption)
+            kind,
+            chat,
+            caption,
+            lambda: self._client.send_media(chat, image_url, caption),
+            fallback=lambda: self._client.send_text(chat, caption),
         )
 
     async def _send(
@@ -285,6 +295,7 @@ class Pacer:
         chat: str,
         wording: str,
         wire: Callable[[], Awaitable[str]],
+        fallback: Callable[[], Awaitable[str]] | None = None,
     ) -> SentMessage:
         """One paced, counted send; `wire` puts it on the wire and answers its ID."""
         if not wording.strip():
@@ -314,7 +325,7 @@ class Pacer:
 
             typing_seconds = self._draw_typing_seconds(wording)
             await self._type_for(chat, typing_seconds)
-            return await self._deliver(kind, chat, wording, waited, typing_seconds, wire)
+            return await self._deliver(kind, chat, wording, waited, typing_seconds, wire, fallback)
 
     async def paused(self) -> bool:
         """Whether the switch says Rebe is meant to be silent right now.
@@ -524,6 +535,7 @@ class Pacer:
         waited: float,
         typing_seconds: float,
         wire: Callable[[], Awaitable[str]],
+        fallback: Callable[[], Awaitable[str]] | None = None,
     ) -> SentMessage:
         """Write the send down, then put it on the wire.
 
@@ -548,7 +560,22 @@ class Pacer:
             # section 4 of the playbook answers all of them with "back off and
             # tell the maintainer", and this is the only place a send can fail.
             await self._watch.send_failed(exc)
-            raise
+            if fallback is None:
+                raise
+            # The fallback runs inside this same delivery, not as a retry of the
+            # send: the envelope already decided, the send is already recorded,
+            # and a second pass would read its own record as a duplicate. Nor is
+            # the fallback itself a loop - one photo attempt, one text, because
+            # what failed is the picture, not the connection, and sending the
+            # same picture again would fail the same way. A fallback that also
+            # fails raises like any send: the transport is broken, and that is
+            # news, not a missing picture.
+            logger.info("the photo did not get out; sending its caption as text instead")
+            try:
+                message_id = await fallback()
+            except EvolutionError as fallback_exc:
+                await self._watch.send_failed(fallback_exc)
+                raise
         await self._settle(chat)
         logger.info(
             "sent a %s to %s after %.1fs typing (%.1fs paced), message id %s",
