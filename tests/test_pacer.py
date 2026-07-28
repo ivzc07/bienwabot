@@ -353,6 +353,34 @@ async def test_the_hourly_ceiling_counts_posts_and_replies_together(
     assert refused.value.retry_after is not None
 
 
+async def test_a_photo_fills_the_same_ceiling_it_is_refused_by(
+    evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
+) -> None:
+    """Both directions: a full hour refuses a photo, and a photo that went out
+    counts against the text that follows - the ceilings know one send log.
+
+    The hour is filled with replies so the post-to-post gap, which would refuse
+    a second post long before the ceiling matters, stays out of the way.
+    """
+    pacer = make_pacer(evolution, log, clock, sleeper)
+    await seed_send(log, clock.now() - timedelta(minutes=40), kind=SendKind.REPLY, text="uno")
+    await seed_send(log, clock.now() - timedelta(minutes=30), kind=SendKind.REPLY, text="dos")
+    await seed_send(log, clock.now() - timedelta(minutes=20), kind=SendKind.REPLY, text="tres")
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+    assert refused.value.reason is RefusalReason.HOURLY_CEILING
+
+    clock.advance(timedelta(minutes=45))  # the seeded hour has drained
+    await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+    await pacer.send(SendKind.REPLY, GROUP, "otra cosa distinta")
+    await pacer.send(SendKind.REPLY, GROUP, "y otra mas")
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send(SendKind.REPLY, GROUP, MESSAGE)
+    assert refused.value.reason is RefusalReason.HOURLY_CEILING
+
+
 async def test_the_hour_is_a_rolling_window_not_a_clock_hour(
     pacer: Pacer, log: InMemorySendLog, clock: ManualClock, evolution: FakeEvolution
 ) -> None:
