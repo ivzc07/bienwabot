@@ -7,6 +7,7 @@ import logging
 import pytest
 from pydantic import BaseModel
 
+from rebe_agent import news
 from rebe_agent.brain import (
     CALL_SHAPES,
     DEEPSEEK_MODEL,
@@ -508,3 +509,76 @@ async def test_the_unusable_shape_line_stays_bounded(
         assert "text[5000]=" in line
         assert len(line) < 700
         assert line.endswith("...")
+
+
+MANGLED_NEWS_BODY = '{"text":":"ya leiste sobre DeltaNet y sus variantes de atencion lineal?"}'
+"""The 2026-07-28 incident body, verbatim from the production log.
+
+DeepSeek's JSON mode opened the value string, wrote a lone `:` where the post
+was meant to begin (and the inverted question mark was never written), closed
+the string, and wrote the whole post as bare text after it. `finish_reason`
+was `stop` and every word of the answer arrived inside the broken envelope.
+"""
+
+
+async def test_an_answer_inside_a_broken_envelope_is_recovered(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """A news_summary call died on 2026-07-28 as `Invalid JSON` over
+    `MANGLED_NEWS_BODY`, on both attempts, and the post was lost though every
+    word of it had arrived. The envelope is not the answer: when the schema is
+    one text field and the JSON around it is broken, the text is recovered and
+    validated, and the run keeps its post.
+
+    The real `NewsPost` rather than the stand-in above, because the field count
+    is exactly what this behaviour turns on."""
+    fake = FakeDeepSeek(json_output_response(MANGLED_NEWS_BODY))
+
+    post = await brain_for(settings, fake, store).ask(
+        CallType.NEWS_SUMMARY, "resume esto", news.NewsPost
+    )
+
+    assert post.text == "ya leiste sobre DeltaNet y sus variantes de atencion lineal?"
+
+
+async def test_a_clean_second_sample_wins_over_a_recovered_first(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The retry exists because a fresh sample of a flaky provider is cheap
+    insurance; recovery is for when the fresh sample glitches the same way,
+    never a reason to skip asking again."""
+    fake = FakeDeepSeek(
+        json_output_response(MANGLED_NEWS_BODY),
+        json_output_response('{"text": "ojo con DeltaNet y la atencion lineal"}'),
+    )
+
+    post = await brain_for(settings, fake, store).ask(
+        CallType.NEWS_SUMMARY, "resume esto", news.NewsPost
+    )
+
+    assert post.text == "ojo con DeltaNet y la atencion lineal"
+
+
+async def test_a_broken_envelope_for_a_multi_field_answer_still_fails(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """Recovery reads the one field there is. With more than one, which string
+    was which is guesswork, and a guessed answer is worse than a dropped call."""
+    fake = FakeDeepSeek(
+        json_output_response('{"framing":":"Ojo", "line": "Sale.", "url": "https://x.mx/a"}')
+    )
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+
+async def test_a_broken_envelope_without_the_answer_inside_still_fails(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """A truncated generation holds no complete string to recover - the key is
+    the only literal - so the call fails as before. Recovery is for answers
+    that arrived, not for inventing ones that did not."""
+    fake = FakeDeepSeek(json_output_response('{"text":"ya leiste'))
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", news.NewsPost)
