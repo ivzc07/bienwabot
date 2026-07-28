@@ -210,23 +210,69 @@ async def test_a_failure_detail_cannot_grow_without_bound(
     assert len(str(caught.value)) < 1000
 
 
-async def test_a_validation_failure_is_not_retried_into_a_second_billed_call(
+async def test_an_unusable_answer_earns_one_more_try(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
-    """One logical call is one request, or the counter cannot detect a loop."""
-    fake = FakeDeepSeek(json_output_response('{"framing": "Ojo"}'))
+    """The 2026-07-28 incident: DeepSeek answered 200 with whitespace in `content`
+    three times in twenty minutes, and three tier-one replies died of it - while
+    the same request minutes later answered fine. A blank completion gets one
+    second chance, and the retry is reserved and billed like any other call."""
+    fake = FakeDeepSeek(json_output_response(" \n"), json_output_response(VALID_POST))
+
+    post = await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    assert post.framing == "Ojo"
+    assert len(fake.requests) == 2
+    assert await store.calls_on(TODAY) == 2
+
+
+async def test_a_second_unusable_answer_is_a_failure(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """One retry, not a loop: two blanks in a row is a bad provider, not bad luck."""
+    fake = FakeDeepSeek(json_output_response(" \n"))
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    assert len(fake.requests) == 2
+    assert await store.calls_on(TODAY) == 2
+
+
+async def test_a_transport_failure_is_not_retried(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The retry is for an answer that came back unusable. A request that never
+    got an answer at all fails once, as it always has."""
+    fake = FakeDeepSeek(500)
 
     with pytest.raises(BrainCallError):
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
 
     assert len(fake.requests) == 1
-    assert await store.calls_on(TODAY) == 1
+
+
+async def test_a_validation_failure_is_retried_once_and_every_attempt_is_counted(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """One logical call used to be one request, so the counter could detect a
+    loop. The blank-completion retry changed the shape of that guarantee, not
+    its substance: every attempt reserves its own call against the day's
+    ceiling, so a runaway still cannot hide from the counter."""
+    fake = FakeDeepSeek(json_output_response('{"framing": "Ojo"}'))
+
+    with pytest.raises(BrainCallError):
+        await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    assert len(fake.requests) == 2
+    assert await store.calls_on(TODAY) == 2
 
 
 async def test_a_failed_call_still_books_the_tokens_it_was_billed_for(
     settings: Settings, store: InMemoryUsageStore
 ) -> None:
-    """A call that fails validation was still generated, and still cost money."""
+    """A call that fails validation was still generated, and still cost money -
+    on the first attempt and on the retry alike."""
     fake = FakeDeepSeek(
         json_output_response(
             '{"framing": "Ojo"}',
@@ -244,7 +290,7 @@ async def test_a_failed_call_still_books_the_tokens_it_was_billed_for(
         await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
 
     assert (await store.totals_on(TODAY))[CallType.NEWS_SUMMARY] == DayTotals(
-        calls=1, cache_hit_tokens=700, cache_miss_tokens=300, completion_tokens=150
+        calls=2, cache_hit_tokens=1400, cache_miss_tokens=600, completion_tokens=300
     )
 
 
