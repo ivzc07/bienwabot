@@ -490,6 +490,20 @@ async def test_at_three_in_the_morning_a_post_is_refused_while_a_reply_goes_out(
     assert evolution.texts == [MESSAGE]
 
 
+async def test_a_photo_post_is_held_overnight_exactly_as_a_text_post_is(
+    evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
+) -> None:
+    """A picture changes nothing about when Rebe sleeps."""
+    clock.set(datetime(2026, 7, 25, 3, 0, tzinfo=MEXICO_CITY))
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=ROOMY)
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+
+    assert refused.value.reason is RefusalReason.OVERNIGHT_HOLD
+    assert evolution.calls == []
+
+
 async def test_consecutive_posts_are_spaced_by_at_least_seventy_five_minutes(
     evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
 ) -> None:
