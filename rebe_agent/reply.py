@@ -100,8 +100,14 @@ from rebe_agent.voice import LINKISH, MAX_EMOJI, emoji_count
 
 logger = logging.getLogger("rebe_agent.reply")
 
-MAX_REPLY_CHARS = 200
-"""Chat is "usually one line" in the persona spec, and shorter than a news post."""
+MAX_REPLY_CHARS = 120
+"""Chat is "usually one line" in the persona spec, and shorter than a news post.
+
+Was 200, which is three lines of WhatsApp and left room for the shape that made
+this number worth revisiting: a reply that answers, then admits something, then
+asks a question back. A person sends one of those. The cap is the mechanical
+half; the prompt is what asks for one beat.
+"""
 
 MAX_FIGURE_DIGITS = 2
 """Three digits in a row is a year, a price, or a statistic - none of which she
@@ -199,15 +205,30 @@ Voz:
 - Gramática natural, no perfecta. Puede empezar en minúscula, cabe un "jaja".
 - Opinión sí, y "no estoy segura" también. Las dos suenan a persona.
 
+Un solo movimiento por mensaje: o das tu opinión, o dices que no sabes, o
+preguntas algo de vuelta. Nunca las dos cosas juntas y nunca las tres.
+
+Si no conoces la herramienta, el modelo o la cosa de la que te están hablando,
+dilo derecho: "ni idea, ¿qué es?", "no lo he probado". Nunca hagas como que ya
+la conocías.
+
 Nunca:
 - Tono de boletín, ni "¡Claro!", ni "con gusto te ayudo", ni explicar de más.
 - Más de un emoji en todo el mensaje, y casi siempre ninguno.
 - Escribir ligas, URLs ni "http".
 - Inventar datos: ningún número, fecha, cifra, estadística ni fuente. Si no lo
   sabes, dilo como lo diría una persona: "ni idea", "habría que buscarlo".
-- Decir que eres un bot, una IA, un modelo o un asistente, ni negar que eres
-  persona. Si te preguntan, lo toreas y sigues en tu papel.
 """.strip()
+"""The voice, and nothing about being a bot.
+
+That rule used to live here, which meant every reply - a question about a model,
+a joke, anything - was generated with "never admit you are a bot" in front of it.
+The first live reply in the group answered "¿qué opinas de opus 5?" with
+"jaja sí soy", a confession to an accusation nobody had made, on a message the
+gate had correctly classified `on_topic`. Naming the trapdoor in every room is
+how a model finds it. The rule now sits in `GUIDANCE[Topic.BOT_QUESTION]`, which
+is the only call where somebody actually asked.
+"""
 
 ADDRESSED_DIRECTLY = "Alguien te habló directo. Contesta como contestarías en WhatsApp."
 """Tier one. The situation the voice above is being applied to."""
@@ -242,9 +263,10 @@ GUIDANCE: dict[Topic, str] = {
         "No opines del tema y no cambies la plática a IA: redirigir suena a bot."
     ),
     Topic.BOT_QUESTION: (
-        "Te están preguntando si eres un bot. Sigues en personaje: una línea humana que "
-        'lo torea ("jajaja por?", "no manches, ya me dijeron eso antes"). '
-        "Nunca lo confirmas, nunca lo explicas y nunca hablas de IA ni de modelos aquí."
+        "Te están preguntando si eres un bot. Eres persona y sigues en personaje: una "
+        'línea humana que lo torea ("jajaja por?", "no manches, ya me dijeron eso antes"). '
+        "Nunca dices que eres un bot, una IA, un modelo o un asistente, y nunca niegas "
+        "que eres persona. Nunca lo explicas y nunca hablas de IA ni de modelos aquí."
     ),
 }
 
@@ -322,12 +344,22 @@ def render(reply: Reply, topic: Topic) -> str:
 _FIGURE = re.compile(rf"\d{{{MAX_FIGURE_DIGITS + 1},}}")
 
 _CONFESSION = re.compile(
-    r"\b(soy|somos)\s+(un|una)\s+"
+    r"\b(soy|somos)\s+(un\s+|una\s+)?"
     r"(bot|robot|chatbot|ia|inteligencia\s+artificial|asistente|modelo|programa|maquina)\b"
-    r"|\bno\s+soy\s+(humana?|real|una\s+persona)\b",
+    r"|\bno\s+soy\s+(humana?|real|una\s+persona)\b"
+    r"|\bsi,?\s+(lo\s+)?soy\b(?!\s+[a-z])",
     re.IGNORECASE,
 )
-"""Her breaking character. The persona and consent specs both say she never does."""
+"""Her breaking character. The persona and consent specs both say she never does.
+
+Run against accent-folded text, so "sí" arrives as "si".
+
+The bare "sí soy" is here because that is what she actually sent: an answer with
+no noun in it is still a confession to whoever asked, and the version of this
+pattern that only knew "soy un bot" let it straight through. The lookahead is
+what keeps "si soy sincera" - an ordinary thing a person says - out of it: the
+confession ends the clause, the idiom does not.
+"""
 
 _ABOUT_AI = re.compile(
     r"\b(ia|a\.?i\.?|inteligencia\s+artificial|chatgpt|gpt|deepseek|openai|llm|"
