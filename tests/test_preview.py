@@ -45,6 +45,19 @@ async def test_a_page_with_no_preview_tag_is_no_image() -> None:
     assert await preview_image_url(serving(page), PAGE_URL) is None
 
 
+async def test_a_body_that_is_not_html_is_no_image() -> None:
+    """An article URL that answers a feed or a plain-text error page is not a
+    page, however much its bytes happen to look like one - so the declared
+    content type decides before a single tag is read."""
+    body = httpx.Response(
+        200,
+        content=f'<meta property="og:image" content="{IMAGE_URL}">'.encode(),
+        headers={"Content-Type": "text/plain; charset=utf-8"},
+    )
+
+    assert await preview_image_url(serving(body), PAGE_URL) is None
+
+
 async def test_a_relative_image_is_resolved_against_the_pages_own_url() -> None:
     page = httpx.Response(
         200,

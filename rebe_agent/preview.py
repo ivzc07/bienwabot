@@ -63,6 +63,11 @@ async def preview_image_url(http: httpx.AsyncClient, url: str) -> str | None:
             timeout=REQUEST_TIMEOUT_SECONDS,
             follow_redirects=True,
         ) as response:
+            if "html" not in response.headers.get("content-type", ""):
+                # A feed, a PDF, a JSON error page: whatever its bytes look
+                # like, it is not a page and it declares no preview image.
+                logger.info("no preview image from %s: not an HTML page", url)
+                return None
             head = await _read_head(response)
     except httpx.HTTPError as exc:
         logger.info("no preview image from %s: %s", url, exc)
