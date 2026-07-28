@@ -39,6 +39,12 @@ async def test_a_page_with_only_a_twitter_image_falls_back_to_it() -> None:
     assert await preview_image_url(serving(page), PAGE_URL) == IMAGE_URL
 
 
+async def test_a_page_with_no_preview_tag_is_no_image() -> None:
+    page = httpx.Response(200, html="<html><head><title>Local model</title></head></html>")
+
+    assert await preview_image_url(serving(page), PAGE_URL) is None
+
+
 async def test_a_relative_image_is_resolved_against_the_pages_own_url() -> None:
     page = httpx.Response(
         200,
