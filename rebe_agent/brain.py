@@ -132,6 +132,12 @@ class CallShape:
     normal answer is never cut off, tight enough that a runaway generation stops
     within cents - but the room a thinking model needs is not the size of its
     answer.
+
+    Nor is it proportional to it. The cap that matters is the one on the *hardest
+    question of that call type*, and the hardest question is not the longest
+    answer: "are you a bot?" wants one line back and is the most thought this
+    process ever buys. Read these numbers as a thinking budget with an answer
+    attached, not as an answer with headroom.
     """
 
     max_tokens: int
@@ -139,15 +145,26 @@ class CallShape:
 
 
 CALL_SHAPES: dict[CallType, CallShape] = {
-    # A: a WhatsApp-short Spanish post wrapped in JSON. Estimated at ~150 tokens.
-    CallType.NEWS_SUMMARY: CallShape(max_tokens=400, temperature=0.8),
+    # A: a WhatsApp-short Spanish post wrapped in JSON. Estimated at ~150 tokens,
+    # and raised with C rather than waiting for its own outage: 400 is below the
+    # gate's 600, and 600 was already the number a *thirty-token* verdict needed
+    # once thinking was counted. A truncated post is not a rejected post - it
+    # raises out of the run and the slot goes empty - so this one is not worth
+    # learning from the group.
+    CallType.NEWS_SUMMARY: CallShape(max_tokens=1500, temperature=0.8),
     # B: a small typed verdict. Estimated at ~30 tokens, and a judgement call
     # wants to be repeatable, so the temperature is low. The cap is nowhere near
     # 2-3x that estimate because on V4 the cap covers the chain-of-thought too,
     # and 120 truncated a live call mid-answer.
     CallType.REPLY_GATE: CallShape(max_tokens=600, temperature=0.2),
-    # C: the only member-visible prose. Estimated at ~60 tokens.
-    CallType.REPLY_GENERATION: CallShape(max_tokens=600, temperature=0.9),
+    # C: the only member-visible prose. Estimated at ~60 tokens, and given 2500
+    # of room, because this is the call that thinks the most for the least. At
+    # 600 two live "eres un bot?" messages in a row came back with a blank
+    # answer - the whole budget spent in `reasoning_content`, `content` left as
+    # whitespace, and a JSON parse that died at column 16 of nothing. A question
+    # about what she is, is exactly the question a thinking model turns over,
+    # and unlike a gate there is no short verdict to land on.
+    CallType.REPLY_GENERATION: CallShape(max_tokens=2500, temperature=0.9),
     # D: B against an article instead of a chat message. Estimated at ~50 tokens.
     CallType.RELEVANCE_GATE: CallShape(max_tokens=600, temperature=0.2),
     # The `--ask` smoke test. Room to say something, not room to ramble.
