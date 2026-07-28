@@ -17,6 +17,7 @@ import httpx
 
 PRESENCE_PATH = "/chat/sendPresence/"
 TEXT_PATH = "/message/sendText/"
+MEDIA_PATH = "/message/sendMedia/"
 READ_PATH = "/chat/markMessageAsRead/"
 
 BASE_URL = "http://bien-evo:8080"
@@ -39,6 +40,10 @@ class Call:
     @property
     def is_text(self) -> bool:
         return TEXT_PATH in self.path
+
+    @property
+    def is_media(self) -> bool:
+        return MEDIA_PATH in self.path
 
     @property
     def is_read(self) -> bool:
@@ -77,6 +82,11 @@ class FakeEvolution:
         return [str(call.body.get("text", "")) for call in self.calls if call.is_text]
 
     @property
+    def medias(self) -> list[dict[str, Any]]:
+        """Every photo body, in order - the image URL and the caption are both in it."""
+        return [call.body for call in self.calls if call.is_media]
+
+    @property
     def reads(self) -> list[str]:
         """Every message id that was marked read, in order."""
         return [id for call in self.calls if call.is_read for id in call.read_ids]
@@ -88,7 +98,7 @@ class FakeEvolution:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        known = (PRESENCE_PATH, TEXT_PATH, READ_PATH)
+        known = (PRESENCE_PATH, TEXT_PATH, MEDIA_PATH, READ_PATH)
         assert any(prefix in path for prefix in known), f"unexpected path {path}"
         body = json.loads(request.content) if request.content else {}
         self.calls.append(Call(path=path, body=body, api_key=request.headers.get("apikey")))
@@ -100,7 +110,7 @@ class FakeEvolution:
             status = self.read_status
         if status >= 400:
             return httpx.Response(status, json={"error": "stub failure"})
-        if TEXT_PATH in path:
+        if TEXT_PATH in path or MEDIA_PATH in path:
             return httpx.Response(status, json={"key": {"id": self.message_id}})
         if READ_PATH in path:
             return httpx.Response(status, json={"message": "read"})
@@ -113,4 +123,6 @@ class FakeEvolution:
 def _label(call: Call) -> str:
     if call.is_presence:
         return call.presence
+    if call.is_media:
+        return "media"
     return "read" if call.is_read else "text"

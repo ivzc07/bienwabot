@@ -41,6 +41,28 @@ async def test_a_text_goes_to_the_documented_endpoint_and_answers_with_its_id(
     assert call.api_key == API_KEY
 
 
+async def test_a_photo_goes_to_the_media_endpoint_with_its_caption(
+    client: EvolutionClient, evolution: FakeEvolution
+) -> None:
+    """The body is the whole contract: WhatsApp fetches the image itself, so
+    `media` is a URL rather than bytes, and her words ride along as `caption`."""
+    image = "https://openai.com/og/local-model.png"
+    caption = "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+
+    message_id = await client.send_media(GROUP, image, caption)
+
+    assert message_id == evolution.message_id
+    call = evolution.calls[-1]
+    assert call.path == f"/message/sendMedia/{INSTANCE}"
+    assert call.body == {
+        "number": GROUP,
+        "mediatype": "image",
+        "media": image,
+        "caption": caption,
+    }
+    assert call.api_key == API_KEY
+
+
 async def test_a_presence_carries_its_hold_in_milliseconds(
     client: EvolutionClient, evolution: FakeEvolution
 ) -> None:
