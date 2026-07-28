@@ -1,10 +1,12 @@
 """The one place this process talks to Evolution API.
 
-Three calls, all from section 3 of `docs/wayfinder/anti-ban-ops-spec.md`:
+Four calls, the first three from section 3 of `docs/wayfinder/anti-ban-ops-spec.md`:
 
 - `POST /chat/sendPresence/{instance}` - "Rebe is typing".
 - `POST /message/sendText/{instance}` - the message itself.
 - `POST /chat/markMessageAsRead/{instance}` - the blue ticks before a reply.
+- `POST /message/sendMedia/{instance}` - a news post that carries the article's
+  own preview image, her words as the caption.
 
 `sendPresence` cannot be asked to only *set* a presence. Its schema makes `delay`
 required, and the handler always sets the presence, waits that long, and then
@@ -92,6 +94,13 @@ class EvolutionSender(Protocol):
         The ID is best-effort: an empty string means the message went out but the
         response did not name it, which is worth a log line and nothing more.
         Raises `EvolutionError` if the message did not get out.
+        """
+
+    async def send_media(self, chat: str, media_url: str, caption: str) -> str:
+        """Send one image with a caption and answer with the WhatsApp message ID.
+
+        Same contract as `send_text`: the ID is best-effort, and an
+        `EvolutionError` means the message did not get out.
         """
 
 
@@ -184,10 +193,21 @@ class EvolutionClient:
             {"number": chat, "text": text},
             action="send a message",
         )
-        key = payload.get("key")
-        if isinstance(key, dict) and key.get("id") is not None:
-            return str(key["id"])
-        return ""
+        return _message_id(payload)
+
+    async def send_media(self, chat: str, media_url: str, caption: str) -> str:
+        """Send one image with a caption, and answer with the WhatsApp message ID.
+
+        `media` is a URL rather than bytes: WhatsApp's servers fetch the image
+        themselves, which is also why the URL must be absolute and fetchable -
+        the check `rebe_agent.preview` makes before one ever gets this far.
+        """
+        payload = await self._post(
+            f"/message/sendMedia/{self._instance}",
+            {"number": chat, "mediatype": "image", "media": media_url, "caption": caption},
+            action="send a photo",
+        )
+        return _message_id(payload)
 
     async def _post(self, path: str, body: dict[str, Any], *, action: str) -> dict[str, Any]:
         try:
@@ -205,6 +225,18 @@ class EvolutionClient:
             raise EvolutionError(action, status=response.status_code, detail=_describe(response))
 
         return _payload(response)
+
+
+def _message_id(payload: dict[str, Any]) -> str:
+    """The WhatsApp message ID, best-effort.
+
+    An empty string means the message went out but the response did not name
+    it, which is worth a log line and nothing more.
+    """
+    key = payload.get("key")
+    if isinstance(key, dict) and key.get("id") is not None:
+        return str(key["id"])
+    return ""
 
 
 def _describe(response: httpx.Response) -> str:

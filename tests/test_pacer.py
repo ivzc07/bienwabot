@@ -32,6 +32,10 @@ SEED = 20260725
 MESSAGE = "Nuevo modelo de OpenAI, ahora corre local. Se ve interesante."
 """Sixty-one characters: about 1830 ms of typing, comfortably inside the clamp."""
 
+IMAGE = "https://openai.com/og/local-model.png"
+CAPTION = MESSAGE + "\nhttps://openai.com/index/local-model"
+"""A news photo: her words, a newline, the link - the same shape a text post has."""
+
 
 @pytest.fixture
 def clock() -> ManualClock:
@@ -121,6 +125,20 @@ async def test_the_group_sees_typing_before_the_message_arrives(
     assert evolution.shape[0] == COMPOSING
     assert evolution.shape[-2:] == ["text", PAUSED]
     assert evolution.texts == [MESSAGE]
+
+
+async def test_a_photo_goes_out_through_the_same_envelope_as_a_text(
+    pacer: Pacer, evolution: FakeEvolution
+) -> None:
+    """Same composing presence, same cleared presence after; only the message
+    itself is a photo with the caption instead of a bare text."""
+    await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+
+    assert evolution.shape[0] == COMPOSING
+    assert evolution.shape[-2:] == ["media", PAUSED]
+    assert evolution.medias == [
+        {"number": GROUP, "mediatype": "image", "media": IMAGE, "caption": CAPTION}
+    ]
 
 
 async def test_every_call_carries_the_api_key_and_the_configured_instance(
@@ -335,6 +353,34 @@ async def test_the_hourly_ceiling_counts_posts_and_replies_together(
     assert refused.value.retry_after is not None
 
 
+async def test_a_photo_fills_the_same_ceiling_it_is_refused_by(
+    evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
+) -> None:
+    """Both directions: a full hour refuses a photo, and a photo that went out
+    counts against the text that follows - the ceilings know one send log.
+
+    The hour is filled with replies so the post-to-post gap, which would refuse
+    a second post long before the ceiling matters, stays out of the way.
+    """
+    pacer = make_pacer(evolution, log, clock, sleeper)
+    await seed_send(log, clock.now() - timedelta(minutes=40), kind=SendKind.REPLY, text="uno")
+    await seed_send(log, clock.now() - timedelta(minutes=30), kind=SendKind.REPLY, text="dos")
+    await seed_send(log, clock.now() - timedelta(minutes=20), kind=SendKind.REPLY, text="tres")
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+    assert refused.value.reason is RefusalReason.HOURLY_CEILING
+
+    clock.advance(timedelta(minutes=45))  # the seeded hour has drained
+    await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+    await pacer.send(SendKind.REPLY, GROUP, "otra cosa distinta")
+    await pacer.send(SendKind.REPLY, GROUP, "y otra mas")
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send(SendKind.REPLY, GROUP, MESSAGE)
+    assert refused.value.reason is RefusalReason.HOURLY_CEILING
+
+
 async def test_the_hour_is_a_rolling_window_not_a_clock_hour(
     pacer: Pacer, log: InMemorySendLog, clock: ManualClock, evolution: FakeEvolution
 ) -> None:
@@ -472,6 +518,20 @@ async def test_at_three_in_the_morning_a_post_is_refused_while_a_reply_goes_out(
     assert evolution.texts == [MESSAGE]
 
 
+async def test_a_photo_post_is_held_overnight_exactly_as_a_text_post_is(
+    evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
+) -> None:
+    """A picture changes nothing about when Rebe sleeps."""
+    clock.set(datetime(2026, 7, 25, 3, 0, tzinfo=MEXICO_CITY))
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=ROOMY)
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+
+    assert refused.value.reason is RefusalReason.OVERNIGHT_HOLD
+    assert evolution.calls == []
+
+
 async def test_consecutive_posts_are_spaced_by_at_least_seventy_five_minutes(
     evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
 ) -> None:
@@ -559,6 +619,23 @@ async def test_the_same_wording_twice_in_a_row_is_refused(
 
     with pytest.raises(SendRefusedError) as refused:
         await pacer.send(SendKind.REPLY, GROUP, MESSAGE)
+
+    assert refused.value.reason is RefusalReason.DUPLICATE
+    assert evolution.calls == []
+
+
+async def test_the_repeat_rule_reads_the_caption_not_the_picture(
+    pacer: Pacer, evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock
+) -> None:
+    """The fingerprint is taken from the caption, because the caption is the
+    wording a reader scrolls past - a different image under the same words is
+    the same message twice."""
+    await seed_send(log, clock.now() - timedelta(minutes=20), kind=SendKind.POST, text=CAPTION)
+
+    with pytest.raises(SendRefusedError) as refused:
+        await pacer.send_photo(
+            SendKind.POST, GROUP, "https://openai.com/og/a-different-image.png", CAPTION
+        )
 
     assert refused.value.reason is RefusalReason.DUPLICATE
     assert evolution.calls == []

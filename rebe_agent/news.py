@@ -61,6 +61,7 @@ from rebe_agent.feeds import Candidates
 from rebe_agent.items import NewsItem
 from rebe_agent.pacer import Pacer, SendRefusedError, SentMessage
 from rebe_agent.posted import PostedStore
+from rebe_agent.preview import PreviewLookup
 from rebe_agent.sends import SendKind
 from rebe_agent.usage import CallType
 from rebe_agent.voice import DIGITS, LINKISH, MAX_EMOJI, emoji_count
@@ -228,6 +229,7 @@ class NewsLeg:
         *,
         filters: Filters | None = None,
         ranking: Ranking | None = None,
+        preview: PreviewLookup | None = None,
     ) -> None:
         self._brain = brain
         self._pacer = pacer
@@ -236,6 +238,10 @@ class NewsLeg:
         self._clock = clock
         self._filters = filters or Filters()
         self._ranking = ranking or Ranking()
+        # `None` means no previews at all - the dry-run wiring and any test that
+        # does not care about images get exactly the behaviour from before the
+        # preview ticket, without having to stub a lookup that answers `None`.
+        self._preview = preview
 
     @property
     def filters(self) -> Filters:
@@ -331,7 +337,16 @@ class NewsLeg:
     async def post_one(self, chat: str, item: NewsItem) -> Posted:
         """One item, from a model call to a row in the posted store."""
         text = await self._write(item, await self._posted.recent(RECENT_POSTS))
-        message = await self._pacer.send(SendKind.POST, chat, text)
+        # Looked up after the post is written and never in a position to stop
+        # it: `preview_image_url` answers `None` for every failure, and `None`
+        # is exactly the text send below - a missing picture never costs a post.
+        image = await self._preview(item.link) if self._preview is not None else None
+        if image is not None:
+            # The caption is the whole post - her words, a newline, the link -
+            # because the link is still how anybody reads the article.
+            message = await self._pacer.send_photo(SendKind.POST, chat, image, text)
+        else:
+            message = await self._pacer.send(SendKind.POST, chat, text)
         # `render` collapses every run of whitespace in her words, so the first
         # line is exactly what she wrote and the second is the link this module
         # appended. Only the first is worth remembering: it is what the next post

@@ -17,6 +17,7 @@ import time
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from functools import partial
 
 import httpx
 import psycopg
@@ -41,6 +42,7 @@ from rebe_agent.pacer import Pacer, SendRefusedError
 from rebe_agent.pause import Pause, PostgresPauseSwitch
 from rebe_agent.plans import PostgresPlanStore
 from rebe_agent.posted import PostgresPostedStore
+from rebe_agent.preview import preview_image_url
 from rebe_agent.ramp import PostgresRampStore, Ramp
 from rebe_agent.reply import ReplyLeg
 from rebe_agent.scheduler import Scheduler
@@ -317,6 +319,9 @@ def build_news_stack(
         posted,
         clock,
         filters=DEFAULT_FILTERS,
+        # The same web client the feeds use: the lookup is one more bounded GET,
+        # and a second client would be a second set of connections to tune.
+        preview=partial(preview_image_url, web),
     )
     return NewsStack(
         leg=leg,
