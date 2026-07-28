@@ -27,3 +27,13 @@ async def test_a_page_with_an_og_image_answers_with_its_url() -> None:
     )
 
     assert await preview_image_url(serving(page), PAGE_URL) == IMAGE_URL
+
+
+async def test_a_page_with_only_a_twitter_image_falls_back_to_it() -> None:
+    """Plenty of the vendor blogs declare the Twitter card and no Open Graph."""
+    page = httpx.Response(
+        200,
+        html=f'<html><head><meta name="twitter:image" content="{IMAGE_URL}"></head></html>',
+    )
+
+    assert await preview_image_url(serving(page), PAGE_URL) == IMAGE_URL
