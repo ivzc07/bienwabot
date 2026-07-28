@@ -53,8 +53,8 @@ from typing import Any, TypeVar, cast
 import httpx
 from openai import AsyncOpenAI
 from pydantic import BaseModel
-from pydantic_ai import Agent, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai import Agent, UnexpectedModelBehavior, capture_run_messages
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models.openai import OpenAIChatModel, OpenAIChatModelSettings
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.providers.deepseek import DeepSeekProvider
@@ -141,6 +141,41 @@ def _why(exc: BaseException) -> str:
 def _clip(detail: str, limit: int = 600) -> str:
     collapsed = " ".join(detail.split())
     return collapsed if len(collapsed) <= limit else f"{collapsed[:limit]}..."
+
+
+def _unusable_shape(messages: Sequence[ModelMessage]) -> str:
+    """What the model actually sent, for the answer that would not parse.
+
+    `_why` reports the exception chain, and on a blank answer that chain says
+    only `Invalid JSON: EOF while parsing` over an input of `' '` - true, and
+    useless. It cannot say whether the body was empty because the provider
+    stopped early, because a filter refused, or because the whole generation
+    went into `reasoning_content` where the parser never looks.
+
+    The answer to all three is in the response object Pydantic AI already
+    built, so this reads it back off the captured run: the provider's own
+    `finish_reason`, the length and opening characters of every part, and the
+    provider details beside them. Lengths are reported because the distinction
+    that matters most here - nothing at all versus a single space - does not
+    survive being trimmed into a log line.
+    """
+    responses = [m for m in messages if isinstance(m, ModelResponse)]
+    if not responses:
+        return "no response was captured"
+
+    last = responses[-1]
+    fields = [f"finish_reason={last.finish_reason!r}"]
+    if last.provider_details:
+        fields.append(f"provider_details={last.provider_details}")
+    if not last.parts:
+        fields.append("parts=none")
+    for part in last.parts:
+        content = getattr(part, "content", None)
+        if isinstance(content, str):
+            fields.append(f"{part.part_kind}[{len(content)}]={content!r}")
+        else:
+            fields.append(f"{part.part_kind}={content!r}")
+    return _clip(" ".join(fields))
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,14 +373,25 @@ class Brain:
             # understanding.
             tally = RunUsage()
             try:
-                result = await agent.run(
-                    prompt,
-                    model_settings=settings,
-                    message_history=list(message_history) if message_history else None,
-                    usage=tally,
-                )
+                with capture_run_messages() as exchange:
+                    result = await agent.run(
+                        prompt,
+                        model_settings=settings,
+                        message_history=list(message_history) if message_history else None,
+                        usage=tally,
+                    )
             except UnexpectedModelBehavior as exc:
                 unusable = exc
+                # The exception says the answer did not parse; this says what
+                # the answer was. Logged per attempt rather than once at the
+                # end, because two attempts can fail differently and the pair
+                # is the evidence.
+                logger.warning(
+                    "DeepSeek %s call %d came back unusable: %s",
+                    call_type,
+                    attempt,
+                    _unusable_shape(exchange),
+                )
             except Exception as exc:
                 logger.warning("DeepSeek %s call failed: %s", call_type, _why(exc))
                 # The caller's answer to this is silence - the item is dropped
