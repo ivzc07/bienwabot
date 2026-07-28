@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from html.parser import HTMLParser
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -130,4 +130,13 @@ def _declared_image(head: bytes, page_url: str) -> str | None:
     images = _MetaImages()
     images.feed(head.decode("utf-8", errors="replace"))
     declared = images.og_image or images.twitter_image
-    return urljoin(page_url, declared) if declared else None
+    if not declared:
+        return None
+    resolved = urljoin(page_url, declared)
+    if urlparse(resolved).scheme not in ("http", "https"):
+        # The URL is handed to Evolution for WhatsApp's servers to fetch; a
+        # scheme they cannot fetch is not a picture, and a `javascript:` value
+        # is worse.
+        logger.info("refusing a non-HTTP preview image from %s: %r", page_url, resolved)
+        return None
+    return resolved

@@ -8,6 +8,7 @@ and DeepSeek tests use. Nothing here touches the network.
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from rebe_agent.preview import preview_image_url
 
@@ -79,6 +80,24 @@ async def test_a_page_that_answers_an_error_is_no_image() -> None:
     )
 
     assert await preview_image_url(serving(error_page), PAGE_URL) is None
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [
+        "javascript:alert(document.domain)",
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ",
+    ],
+)
+async def test_a_value_that_is_not_an_http_url_is_refused(junk: str) -> None:
+    """The URL is handed to Evolution for WhatsApp's servers to fetch. A scheme
+    they cannot fetch is not a picture, and a `javascript:` value is worse."""
+    page = httpx.Response(
+        200,
+        html=f'<html><head><meta property="og:image" content="{junk}"></head></html>',
+    )
+
+    assert await preview_image_url(serving(page), PAGE_URL) is None
 
 
 async def test_a_relative_image_is_resolved_against_the_pages_own_url() -> None:
