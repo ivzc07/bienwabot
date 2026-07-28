@@ -9,6 +9,7 @@ takes an assertion here.
 
 from __future__ import annotations
 
+import json
 import random
 from collections.abc import Sequence
 from datetime import datetime, timedelta
@@ -22,8 +23,10 @@ from rebe_agent.config import Settings, load_settings
 from rebe_agent.evolution import EvolutionClient, EvolutionError
 from rebe_agent.items import NewsItem
 from rebe_agent.news import (
-    MAX_FRAMING_CHARS,
+    INSTRUCTIONS,
+    MAX_POST_CHARS,
     REJECTIONS_PER_RUN,
+    RETRIES_PER_ITEM,
     NewsLeg,
     NewsPost,
     PostRejectedError,
@@ -47,10 +50,8 @@ all. How far apart posts really sit is the pacer's business, and is asserted
 there rather than re-argued here."""
 
 
-def answer(
-    opener: str = "miren", line: str = "salio un modelo que corre en tu compu"
-) -> dict[str, Any]:
-    return json_output_response(f'{{"opener": {opener!r}, "line": {line!r}}}'.replace("'", '"'))
+def answer(text: str = "miren, salio un modelo que corre sin nube") -> dict[str, Any]:
+    return json_output_response(json.dumps({"text": text}))
 
 
 LAUNCH = item(
@@ -140,11 +141,11 @@ def make_leg(
 # --- the post the group sees -------------------------------------------------
 
 
-def test_the_post_is_one_framing_line_and_the_canonical_link() -> None:
-    post = NewsPost(opener="miren", line="salio un modelo que corre en tu compu")
+def test_the_post_is_her_words_and_the_canonical_link() -> None:
+    post = NewsPost(text="miren, salio un modelo que corre sin nube")
 
     assert render(post, LAUNCH) == (
-        "miren salio un modelo que corre en tu compu\nhttps://openai.com/index/local-model"
+        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
     )
 
 
@@ -155,59 +156,69 @@ def test_the_posted_link_is_the_publishers_own_minus_the_tracking() -> None:
     link" cuts both ways."""
     tracked = item(url="https://www.openai.com/index/local-model/?utm_source=rss")
 
-    rendered = render(NewsPost(opener="", line="ya salio"), tracked)
+    rendered = render(NewsPost(text="ya salio"), tracked)
 
     assert rendered.endswith("\nhttps://www.openai.com/index/local-model/")
     assert tracked.canonical_url == "https://openai.com/index/local-model"
 
 
-def test_a_post_with_no_framing_word_is_still_a_post() -> None:
-    """The persona spec asks for the framing word to be rotated, and sometimes
-    left out entirely - so an empty opener is a valid answer, not a failure."""
-    assert render(NewsPost(opener="", line="ya salio el modelo"), LAUNCH).startswith(
-        "ya salio el modelo\n"
-    )
+def test_the_words_and_the_link_are_never_run_together() -> None:
+    """The live post "Miren esto Un analista predice que..." came from `render`
+    joining a framing word to a capitalised sentence with a bare space. There is
+    one field now, so the only join left is the one before the link, and it is a
+    newline."""
+    rendered = render(NewsPost(text="ojo   con   lo de los libros  raros"), LAUNCH)
+
+    words, link = rendered.split("\n")
+    assert words == "ojo con lo de los libros raros"
+    assert link == LAUNCH.link
 
 
 def test_a_model_that_writes_its_own_link_is_refused() -> None:
     """The one hallucination the group would actually click."""
     with pytest.raises(PostRejectedError, match="link"):
-        render(NewsPost(opener="miren", line="esta en https://openai.com/x"), LAUNCH)
+        render(NewsPost(text="esta en https://openai.com/x"), LAUNCH)
 
     with pytest.raises(PostRejectedError, match="link"):
-        render(NewsPost(opener="miren", line="checa openai.com para verlo"), LAUNCH)
+        render(NewsPost(text="checa openai.com para verlo"), LAUNCH)
 
 
 def test_a_number_the_source_never_gave_is_refused() -> None:
-    """The mechanical half of the anti-hallucination bound: the framing line may
-    restate the source item and nothing else."""
+    """The mechanical half of the anti-hallucination bound: the post may restate
+    the source item and nothing else."""
     with pytest.raises(PostRejectedError, match="700"):
-        render(NewsPost(opener="miren", line="son 700 millones de parametros"), LAUNCH)
+        render(NewsPost(text="son 700 millones de parametros"), LAUNCH)
 
 
 def test_a_number_the_source_did_give_is_fine() -> None:
     grounded = item(title="Llama 4 sale hoy", summary="Corre en 2 GPUs.")
 
-    assert "4" in render(NewsPost(opener="miren", line="salio llama 4, corre en 2 gpus"), grounded)
+    assert "4" in render(NewsPost(text="salio llama 4, corre en 2 gpus"), grounded)
 
 
 def test_more_than_one_emoji_is_refused() -> None:
     with pytest.raises(PostRejectedError, match="emoji"):
-        render(NewsPost(opener="miren 👀🔥", line="salio algo"), LAUNCH)
+        render(NewsPost(text="miren 👀🔥 salio algo"), LAUNCH)
 
 
 def test_one_emoji_is_the_voice_working() -> None:
-    assert "👀" in render(NewsPost(opener="miren esto 👀", line="salio algo bueno"), LAUNCH)
+    assert "👀" in render(NewsPost(text="miren esto 👀 salio algo bueno"), LAUNCH)
 
 
-def test_an_empty_line_is_not_a_post() -> None:
-    with pytest.raises(PostRejectedError, match="no line"):
-        render(NewsPost(opener="miren", line="   "), LAUNCH)
+def test_an_empty_answer_is_not_a_post() -> None:
+    with pytest.raises(PostRejectedError, match="nothing"):
+        render(NewsPost(text="   "), LAUNCH)
 
 
-def test_an_essay_is_not_a_whatsapp_message() -> None:
-    with pytest.raises(PostRejectedError, match="characters"):
-        render(NewsPost(opener="", line="a" * (MAX_FRAMING_CHARS + 1)), LAUNCH)
+def test_a_report_is_not_a_reaction() -> None:
+    """The three posts that started this change were 77, 103 and 141 characters -
+    headlines, translated. The cap is the width of the thing she is asked for."""
+    with pytest.raises(PostRejectedError, match="reaction"):
+        render(NewsPost(text="a" * (MAX_POST_CHARS + 1)), LAUNCH)
+
+    reaction = "ojo con lo de los libros raros y la IA 👀"
+    assert len(reaction) <= MAX_POST_CHARS
+    assert render(NewsPost(text=reaction), LAUNCH).startswith(reaction)
 
 
 @pytest.mark.parametrize(
@@ -232,7 +243,7 @@ def test_emoji_are_counted_the_way_a_reader_counts_them(text: str, expected: int
 
 
 def test_a_single_flag_is_not_two_emoji() -> None:
-    assert "🇲🇽" in render(NewsPost(opener="", line="salio algo en mexico 🇲🇽"), LAUNCH)
+    assert "🇲🇽" in render(NewsPost(text="salio algo en mexico 🇲🇽"), LAUNCH)
 
 
 # --- one run -----------------------------------------------------------------
@@ -253,9 +264,50 @@ async def test_one_run_puts_one_curated_item_in_the_group(
     assert [post.item for post in sent] == [LAUNCH]
     assert evolution.shape == ["composing", "text", "paused"]
     assert evolution.texts == [
-        "miren salio un modelo que corre en tu compu\nhttps://openai.com/index/local-model"
+        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
     ]
     assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
+
+
+async def test_every_call_carries_the_persona(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """The regression that produced three press releases in the group: these
+    instructions existed and were never passed, so the only thing a call carried
+    was the source, the headline and a schema - and back came the headline."""
+    fake = FakeDeepSeek(answer())
+
+    await make_leg(settings, fake, evolution, posted, clock, StubCandidates(LAUNCH)).run(GROUP)
+
+    request = json.dumps(fake.last_request, ensure_ascii=False)
+    assert INSTRUCTIONS.splitlines()[0] in request
+    assert "No la reportes" in request
+
+
+async def test_she_is_shown_what_she_already_wrote(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """Memory, not a rule: the same prompt at the same temperature drifts to the
+    same opener, so the second call is told how the first one read. Her own words
+    go in; the link never does, for the same reason the article's never does."""
+    pool = StubCandidates(
+        item(source_id="a", title="Primera nota de hoy sobre IA", url="https://a.mx/1"),
+        item(source_id="b", title="Segunda nota de hoy sobre IA", url="https://a.mx/2"),
+    )
+    fake = FakeDeepSeek(answer(), answer(text="ya salio otra cosa hoy"))
+
+    await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP, limit=2)
+
+    first, second = (request["messages"][-1]["content"] for request in fake.requests)
+    assert "miren, salio un modelo que corre sin nube" not in first, "nothing written yet"
+    assert "miren, salio un modelo que corre sin nube" in second
+    assert "https://" not in second
 
 
 async def test_the_item_goes_out_as_a_post_so_the_quiet_hours_apply(
@@ -319,7 +371,7 @@ async def test_the_same_article_from_two_sources_is_posted_once(
     )
     leg = make_leg(
         settings,
-        FakeDeepSeek(answer(), answer(line="otra cosa distinta paso hoy")),
+        FakeDeepSeek(answer(), answer(text="otra cosa distinta paso hoy")),
         evolution,
         posted,
         clock,
@@ -406,7 +458,7 @@ async def test_a_post_that_fails_validation_never_reaches_the_group(
     posted: InMemoryPostedStore,
     clock: ManualClock,
 ) -> None:
-    fake = FakeDeepSeek(answer(line="son 900 mil millones de parametros, neta"))
+    fake = FakeDeepSeek(answer(text="son 900 mil millones de parametros, neta"))
 
     sent = await make_leg(settings, fake, evolution, posted, clock, StubCandidates(LAUNCH)).run(
         GROUP
@@ -417,29 +469,63 @@ async def test_a_post_that_fails_validation_never_reaches_the_group(
     assert posted.items == []
 
 
-async def test_an_unusable_answer_drops_that_item_and_the_run_tries_the_next(
+async def test_an_unusable_answer_asks_the_same_article_again(
     settings: Settings,
     evolution: FakeEvolution,
     posted: InMemoryPostedStore,
     clock: ManualClock,
 ) -> None:
-    """Unlike a brain failure, a rejected post is about *this* item: the model
-    could only describe this headline by inventing a number. The next candidate
-    is a different headline, so the run moves on rather than giving up."""
+    """A rejection is about the wording, and the article underneath it is still
+    the best thing on the shortlist. So the story is not thrown away with the
+    sentence: the reason goes back and the same item is asked again."""
     best = item(source_id="a", title="Primera nota sobre un modelo", url="https://a.mx/1")
-    next_best = item(
-        source_id="b",
-        title="Segunda nota sobre un modelo",
-        url="https://a.mx/2",
-        published_at=NOON - timedelta(hours=5),
-    )
-    fake = FakeDeepSeek(answer(line="son 900 mil millones de parametros"), answer(line="ya salio"))
+    next_best = item(source_id="b", title="Segunda nota sobre un modelo", url="https://a.mx/2")
+    fake = FakeDeepSeek(answer(text="son 900 mil millones de parametros"), answer(text="ya salio"))
 
     sent = await make_leg(
         settings, fake, evolution, posted, clock, StubCandidates(best, next_best)
     ).run(GROUP)
 
-    assert [post.item for post in sent] == [next_best]
+    assert [post.item for post in sent] == [best], "the retry rescued the story"
+    assert [row.source_id for row in posted.items] == ["a"]
+
+
+async def test_the_retry_is_told_what_was_wrong_with_the_last_answer(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """Asking again with the same prompt would buy the same answer. What makes
+    the second attempt different is `render`'s own words for the refusal."""
+    fake = FakeDeepSeek(answer(text="son 900 mil millones de parametros"), answer(text="ya salio"))
+
+    await make_leg(settings, fake, evolution, posted, clock, StubCandidates(LAUNCH)).run(GROUP)
+
+    retry = fake.requests[1]["messages"][-1]["content"]
+    assert "900" in retry, "the reason names the figure the source never supplied"
+
+
+async def test_a_story_she_cannot_write_about_is_given_up_on(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """The retry is one second chance, not a loop: an article the model can only
+    describe by inventing a number is dropped, and the run tries the next one."""
+    unwritable = item(source_id="a", title="Primera nota sobre un modelo", url="https://a.mx/1")
+    ordinary = item(source_id="b", title="Segunda nota sobre un modelo", url="https://a.mx/2")
+    fake = FakeDeepSeek(
+        *[answer(text="son 900 mil millones de parametros")] * (RETRIES_PER_ITEM + 1),
+        answer(text="ya salio"),
+    )
+
+    sent = await make_leg(
+        settings, fake, evolution, posted, clock, StubCandidates(unwritable, ordinary)
+    ).run(GROUP)
+
+    assert [post.item for post in sent] == [ordinary]
     assert [row.source_id for row in posted.items] == ["b"]
 
 
@@ -460,12 +546,12 @@ async def test_a_run_stops_paying_for_answers_it_keeps_rejecting(
             for number in range(REJECTIONS_PER_RUN + 3)
         )
     )
-    fake = FakeDeepSeek(answer(line="son 900 mil millones de parametros"))
+    fake = FakeDeepSeek(answer(text="son 900 mil millones de parametros"))
 
     sent = await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP)
 
     assert sent == []
-    assert len(fake.requests) == REJECTIONS_PER_RUN
+    assert len(fake.requests) == REJECTIONS_PER_RUN * (RETRIES_PER_ITEM + 1)
 
 
 async def test_a_failed_send_does_not_permanently_burn_the_item(
@@ -501,7 +587,7 @@ async def test_the_per_run_cap_limits_how_many_items_a_run_can_post(
         item(source_id="b", title="Segunda nota de hoy sobre IA", url="https://a.mx/2"),
         item(source_id="c", title="Tercera nota de hoy sobre IA", url="https://a.mx/3"),
     )
-    fake = FakeDeepSeek(answer(), answer(line="tambien salio otra cosa"), answer(line="y otra mas"))
+    fake = FakeDeepSeek(answer(), answer(text="tambien salio otra cosa"), answer(text="y otra mas"))
 
     sent = await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP, limit=2)
 

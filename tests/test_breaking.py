@@ -127,9 +127,9 @@ class Pool:
 
 
 POSTS = (
-    json_output_response('{"opener": "miren", "line": "esto acaba de salir"}'),
-    json_output_response('{"opener": "chequen", "line": "y esto tambien"}'),
-    json_output_response('{"opener": "orale", "line": "y una mas"}'),
+    json_output_response('{"text": "miren, esto acaba de salir"}'),
+    json_output_response('{"text": "chequen, y esto tambien"}'),
+    json_output_response('{"text": "orale, y una mas"}'),
 )
 """Three different answers, because the pacer refuses identical wording twice."""
 
@@ -244,7 +244,7 @@ async def test_a_big_story_mid_afternoon_posts_off_schedule() -> None:
     assert posted is not None
     assert posted.item.canonical_url == TOP_OF_HN.canonical_url
     assert stack.evolution.texts == [
-        "miren esto acaba de salir\nhttps://www.anthropic.com/news/claude-5"
+        "miren, esto acaba de salir\nhttps://www.anthropic.com/news/claude-5"
     ]
     latest = await stack.sends.latest()
     assert latest is not None and latest.kind is SendKind.POST

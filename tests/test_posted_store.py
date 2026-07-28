@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import timedelta
 
 import psycopg
 import pytest
@@ -120,3 +121,32 @@ async def test_the_table_survives_the_store_being_rebuilt(
 
     async with PostgresPostedStore.connect(DATABASE_URL) as after_restart:
         assert await after_restart.knows(LAUNCH)
+
+
+async def test_her_recent_wording_comes_back_newest_first(
+    store: PostgresPostedStore,
+) -> None:
+    """What the next post is asked not to sound like."""
+    await store.remember(LAUNCH, NOON, "miren, ya salio el modelo local")
+    await store.remember(
+        item(source_id="two", url="https://a.mx/2", title="Otra nota de hoy sobre IA"),
+        NOON + timedelta(hours=1),
+        "ojo con lo de los libros raros",
+    )
+
+    assert await store.recent(5) == [
+        "ojo con lo de los libros raros",
+        "miren, ya salio el modelo local",
+    ]
+    assert await store.recent(1) == ["ojo con lo de los libros raros"]
+
+
+async def test_a_row_from_before_the_column_existed_has_nothing_to_show(
+    store: PostgresPostedStore,
+) -> None:
+    """The table predates the wording, and the live rows in it default to empty.
+    An empty string is not something she wrote, so it is left out rather than
+    handed to the model as a blank post."""
+    await store.remember(LAUNCH, NOON)
+
+    assert await store.recent(5) == []

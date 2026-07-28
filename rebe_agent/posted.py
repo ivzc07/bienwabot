@@ -11,6 +11,13 @@ nothing that would make this table a copy of the news itself. A candidate is
 dropped if *any* of the three matches, and the title is kept alongside them
 purely so a human reading the table can tell what a row was.
 
+The wording Rebe actually sent is kept too, and that one is load-bearing rather
+than decorative: the same prompt at the same temperature drifts to the same
+opener, and "same sentence structure every post" is a bot tell the persona spec
+names outright. `recent` reads the last few back so the news leg can show her
+what she has already written. It is memory, not a rule - nothing here forbids a
+word, it only lets the model see itself.
+
 Written only after a send succeeds. That order costs the occasional re-fetch of
 an item whose send failed, and buys back the guarantee that a transport blip
 never permanently burns an item nobody ever saw.
@@ -38,9 +45,13 @@ class PostedItem:
     canonical_url: str
     title_hash: str
     title: str
+    text: str = ""
+    """Her words, without the link - the address is already in `canonical_url`,
+    and a model that is shown a link is a model that can write one. Empty for a
+    row written before the column existed."""
 
     @classmethod
-    def of(cls, item: NewsItem, at: datetime) -> PostedItem:
+    def of(cls, item: NewsItem, at: datetime, text: str = "") -> PostedItem:
         """Freeze a candidate's three keys at the moment it was posted."""
         return cls(
             posted_at=at,
@@ -49,6 +60,7 @@ class PostedItem:
             canonical_url=item.canonical_url,
             title_hash=item.title_hash,
             title=item.title,
+            text=text,
         )
 
 
@@ -63,8 +75,15 @@ class PostedStore(Protocol):
         to drop the candidate.
         """
 
-    async def remember(self, item: NewsItem, at: datetime) -> None:
+    async def remember(self, item: NewsItem, at: datetime, text: str = "") -> None:
         """Write the item down. Called only after the send succeeded."""
+
+    async def recent(self, limit: int) -> list[str]:
+        """The wording of the last `limit` posts, newest first.
+
+        Only what she wrote: rows from before the column existed have nothing to
+        show and are left out rather than handed back as blanks.
+        """
 
 
 class InMemoryPostedStore:
@@ -77,9 +96,13 @@ class InMemoryPostedStore:
     async def knows(self, item: NewsItem) -> bool:
         return self._seen.knows(item)
 
-    async def remember(self, item: NewsItem, at: datetime) -> None:
-        self.items.append(PostedItem.of(item, at))
+    async def remember(self, item: NewsItem, at: datetime, text: str = "") -> None:
+        self.items.append(PostedItem.of(item, at, text))
         self._seen.remember(item)
+
+    async def recent(self, limit: int) -> list[str]:
+        written = [posted.text for posted in self.items if posted.text]
+        return written[::-1][:limit]
 
 
 SCHEMA = """
@@ -93,6 +116,13 @@ CREATE TABLE IF NOT EXISTS posted_items (
     title         text        NOT NULL
 )
 """
+
+MIGRATIONS = (
+    # The table predates the wording column, and there are live rows in it. A
+    # default of empty is what `recent` reads as "this row was written before we
+    # kept the words", which is true and is not the same as "she wrote nothing".
+    "ALTER TABLE posted_items ADD COLUMN IF NOT EXISTS text text NOT NULL DEFAULT ''",
+)
 
 INDEXES = (
     # Unique, so the same source item cannot end up as two rows. It is not what
@@ -109,6 +139,13 @@ KNOWS = """
 SELECT 1 FROM posted_items
 WHERE (source = %s AND source_id = %s) OR canonical_url = %s OR title_hash = %s
 LIMIT 1
+"""
+
+RECENT = """
+SELECT text FROM posted_items
+WHERE text <> ''
+ORDER BY posted_at DESC, id DESC
+LIMIT %s
 """
 
 
@@ -130,6 +167,8 @@ class PostgresPostedStore:
     async def ensure_schema(self) -> None:
         async with self._pool.connection() as conn:
             await conn.execute(SCHEMA)
+            for migration in MIGRATIONS:
+                await conn.execute(migration)
             for index in INDEXES:
                 await conn.execute(index)
 
@@ -141,14 +180,14 @@ class PostgresPostedStore:
             row = await cursor.fetchone()
         return row is not None
 
-    async def remember(self, item: NewsItem, at: datetime) -> None:
-        posted = PostedItem.of(item, at)
+    async def remember(self, item: NewsItem, at: datetime, text: str = "") -> None:
+        posted = PostedItem.of(item, at, text)
         async with self._pool.connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO posted_items
-                    (posted_at, source, source_id, canonical_url, title_hash, title)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (posted_at, source, source_id, canonical_url, title_hash, title, text)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (source, source_id) DO NOTHING
                 """,
                 (
@@ -158,5 +197,12 @@ class PostgresPostedStore:
                     posted.canonical_url,
                     posted.title_hash,
                     posted.title,
+                    posted.text,
                 ),
             )
+
+    async def recent(self, limit: int) -> list[str]:
+        async with self._pool.connection() as conn:
+            cursor = await conn.execute(RECENT, (limit,))
+            rows = await cursor.fetchall()
+        return [str(row[0]) for row in rows]
