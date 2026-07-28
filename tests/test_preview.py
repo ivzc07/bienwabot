@@ -70,6 +70,17 @@ async def test_a_page_that_times_out_is_no_image() -> None:
     assert await preview_image_url(client, PAGE_URL) is None
 
 
+async def test_a_page_that_answers_an_error_is_no_image() -> None:
+    """A 404's error page may well carry an og:image of its own; it is not the
+    article's, so the status is read before a single tag."""
+    error_page = httpx.Response(
+        404,
+        html=f'<html><head><meta property="og:image" content="{IMAGE_URL}"></head></html>',
+    )
+
+    assert await preview_image_url(serving(error_page), PAGE_URL) is None
+
+
 async def test_a_relative_image_is_resolved_against_the_pages_own_url() -> None:
     page = httpx.Response(
         200,

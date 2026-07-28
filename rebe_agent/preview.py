@@ -63,6 +63,11 @@ async def preview_image_url(http: httpx.AsyncClient, url: str) -> str | None:
             timeout=REQUEST_TIMEOUT_SECONDS,
             follow_redirects=True,
         ) as response:
+            if response.status_code != 200:
+                # An error page can carry an og:image of its own; it is not the
+                # article's.
+                logger.info("no preview image from %s: HTTP %d", url, response.status_code)
+                return None
             if "html" not in response.headers.get("content-type", ""):
                 # A feed, a PDF, a JSON error page: whatever its bytes look
                 # like, it is not a page and it declares no preview image.
