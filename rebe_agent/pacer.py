@@ -61,7 +61,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from enum import StrEnum
@@ -259,7 +259,35 @@ class Pacer:
         Raises `SendRefusedError` when the envelope will not have it, and
         `EvolutionError` when the transport will not have it.
         """
-        if not text.strip():
+        return await self._send(kind, chat, text, lambda: self._client.send_text(chat, text))
+
+    async def send_photo(
+        self, kind: SendKind, chat: str, image_url: str, caption: str
+    ) -> SentMessage:
+        """Send one photo into `chat`, through exactly the envelope a text obeys.
+
+        The ceilings, the quiet hours, the post-to-post gap and the typing
+        presence cannot tell a photo from a text - a human's cadence does not
+        change because the message carries a picture - so both paths are one
+        `_send`, and what differs is only the last call to the transport.
+
+        The caption plays the text's part everywhere the envelope reads the
+        wording - the typing pause is drawn from its length and the repeat rule
+        fingerprints it - because the caption is what a reader scrolls past.
+        """
+        return await self._send(
+            kind, chat, caption, lambda: self._client.send_media(chat, image_url, caption)
+        )
+
+    async def _send(
+        self,
+        kind: SendKind,
+        chat: str,
+        wording: str,
+        wire: Callable[[], Awaitable[str]],
+    ) -> SentMessage:
+        """One paced, counted send; `wire` puts it on the wire and answers its ID."""
+        if not wording.strip():
             raise ValueError("refusing to send an empty message")
 
         async with self._turnstile:
@@ -281,12 +309,12 @@ class Pacer:
             waited = await self._wait_for_the_minute_floor()
 
             now = self._clock.now()
-            await self._check_ceilings(kind, text, now)
+            await self._check_ceilings(kind, wording, now)
             waited += await self._settle_in(chat, now)
 
-            typing_seconds = self._draw_typing_seconds(text)
+            typing_seconds = self._draw_typing_seconds(wording)
             await self._type_for(chat, typing_seconds)
-            return await self._deliver(kind, chat, text, waited, typing_seconds)
+            return await self._deliver(kind, chat, wording, waited, typing_seconds, wire)
 
     async def paused(self) -> bool:
         """Whether the switch says Rebe is meant to be silent right now.
@@ -489,7 +517,13 @@ class Pacer:
             await self._client.send_presence(chat, COMPOSING, seconds)
 
     async def _deliver(
-        self, kind: SendKind, chat: str, text: str, waited: float, typing_seconds: float
+        self,
+        kind: SendKind,
+        chat: str,
+        text: str,
+        waited: float,
+        typing_seconds: float,
+        wire: Callable[[], Awaitable[str]],
     ) -> SentMessage:
         """Write the send down, then put it on the wire.
 
@@ -508,7 +542,7 @@ class Pacer:
             )
         )
         try:
-            message_id = await self._client.send_text(chat, text)
+            message_id = await wire()
         except EvolutionError as exc:
             # A 463 reach-out time-lock, a temp ban, an Evolution that is down:
             # section 4 of the playbook answers all of them with "back off and

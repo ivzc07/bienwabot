@@ -96,6 +96,13 @@ class EvolutionSender(Protocol):
         Raises `EvolutionError` if the message did not get out.
         """
 
+    async def send_media(self, chat: str, media_url: str, caption: str) -> str:
+        """Send one image with a caption and answer with the WhatsApp message ID.
+
+        Same contract as `send_text`: the ID is best-effort, and an
+        `EvolutionError` means the message did not get out.
+        """
+
 
 class EvolutionReader(Protocol):
     """What the webhook leg needs from a transport: read it before answering it.

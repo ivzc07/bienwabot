@@ -32,6 +32,10 @@ SEED = 20260725
 MESSAGE = "Nuevo modelo de OpenAI, ahora corre local. Se ve interesante."
 """Sixty-one characters: about 1830 ms of typing, comfortably inside the clamp."""
 
+IMAGE = "https://openai.com/og/local-model.png"
+CAPTION = MESSAGE + "\nhttps://openai.com/index/local-model"
+"""A news photo: her words, a newline, the link - the same shape a text post has."""
+
 
 @pytest.fixture
 def clock() -> ManualClock:
@@ -121,6 +125,20 @@ async def test_the_group_sees_typing_before_the_message_arrives(
     assert evolution.shape[0] == COMPOSING
     assert evolution.shape[-2:] == ["text", PAUSED]
     assert evolution.texts == [MESSAGE]
+
+
+async def test_a_photo_goes_out_through_the_same_envelope_as_a_text(
+    pacer: Pacer, evolution: FakeEvolution
+) -> None:
+    """Same composing presence, same cleared presence after; only the message
+    itself is a photo with the caption instead of a bare text."""
+    await pacer.send_photo(SendKind.POST, GROUP, IMAGE, CAPTION)
+
+    assert evolution.shape[0] == COMPOSING
+    assert evolution.shape[-2:] == ["media", PAUSED]
+    assert evolution.medias == [
+        {"number": GROUP, "mediatype": "image", "media": IMAGE, "caption": CAPTION}
+    ]
 
 
 async def test_every_call_carries_the_api_key_and_the_configured_instance(
