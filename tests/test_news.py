@@ -310,6 +310,33 @@ async def test_an_item_whose_page_has_an_image_goes_out_as_a_photo(
     assert [row.text for row in posted.items] == ["miren, salio un modelo que corre sin nube"]
 
 
+async def test_an_item_whose_page_has_no_image_goes_out_as_text(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """The fallback is exactly today's behaviour: a plain text message, and
+    nothing lost - the item is still sent, still remembered."""
+
+    async def preview(url: str) -> str | None:
+        return None
+
+    fake = FakeDeepSeek(answer())
+    leg = make_leg(
+        settings, fake, evolution, posted, clock, StubCandidates(LAUNCH), preview=preview
+    )
+
+    sent = await leg.run(GROUP)
+
+    assert [post.item for post in sent] == [LAUNCH]
+    assert evolution.shape == ["composing", "text", "paused"]
+    assert evolution.texts == [
+        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+    ]
+    assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
+
+
 async def test_every_call_carries_the_persona(
     settings: Settings,
     evolution: FakeEvolution,
