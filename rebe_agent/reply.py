@@ -70,7 +70,9 @@ What the model writes is bounded here rather than only asked for in the prompt.
 A reply that carries a link, a figure, a second emoji, a deflection that steers
 back to AI, or - the one that ends the persona - an admission that she is a bot,
 is dropped instead of sent. A model that ignores an instruction once in fifty is
-a bot tell once in fifty.
+a bot tell once in fifty. The laugh alone is corrected instead of dropped: when
+her own turns in the window already carry a "jaja", a new one is stripped and
+the rest of the line still goes out.
 
 One event is handled at a time. The deployment spec's single-replica invariant
 means one lock in one process is enough, and it is necessary: two deliveries
@@ -342,15 +344,28 @@ llamaron cuesta mucho más que quedarse callada.
 """.strip()
 
 
-def render(reply: Reply, topic: Topic) -> str:
+def render(reply: Reply, topic: Topic, *, laughed_lately: bool = False) -> str:
     """The reply as the group will see it, or `ReplyRejectedError` saying why not.
 
     Every rule here is one the prompt also asks for. Asking is not enough at the
     last point where it is still free to catch.
+
+    The laugh is the one rule enforced by rewrite rather than by drop. The prompt
+    asks her not to repeat a muletilla her own recent messages already carry, and
+    the model ignores that one often - her old "jaja" turns ride back in as
+    history, so she imitates herself. Dropping the whole reply for a stylistic
+    tic would break "a name-tag is always answered"; the sentence minus its laugh
+    is still her answer. Only a reply that *was* the laugh has nothing left, and
+    that one is dropped.
     """
     text = " ".join(reply.text.split())
     if not text:
         raise ReplyRejectedError("the model wrote nothing")
+
+    if laughed_lately and _LAUGH.search(text):
+        text = " ".join(_LAUGH.sub("", text).split()).strip(" ,.")
+        if not text:
+            raise ReplyRejectedError("she just laughed, and this reply is only another laugh")
     if len(text) > MAX_REPLY_CHARS:
         raise ReplyRejectedError(f"{len(text)} characters is not a WhatsApp reply")
     if LINKISH.search(text):
@@ -373,6 +388,15 @@ def render(reply: Reply, topic: Topic) -> str:
 
 
 _FIGURE = re.compile(rf"\d{{{MAX_FIGURE_DIGITS + 1},}}")
+
+_LAUGH = re.compile(r"\b(?:j[aei]|ha|he)(?:j[aei]|ha|he)+[jh]?\b", re.IGNORECASE)
+"""A written laugh: "jaja", "jajaja", "jeje", "haha", and their trailing-j kin.
+
+One laugh is the persona; a laugh in every message was the tic that made the
+group notice her. `render` strips a new laugh whenever one of her own turns in
+the window already laughed, so the tic cannot outlast the window however often
+the model reaches for it.
+"""
 
 _CONFESSION = re.compile(
     r"\b(soy|somos)\s+(un\s+|una\s+)?"
@@ -648,8 +672,9 @@ class ReplyLeg:
             logger.info("no reply was generated for %s: %s", message.message_id, exc)
             return None
 
+        laughed = any(_LAUGH.search(turn.text) for turn in history if turn.by_rebe)
         try:
-            return render(reply, topic)
+            return render(reply, topic, laughed_lately=laughed)
         except ReplyRejectedError as exc:
             logger.info("dropping the reply to %s: %s", message.message_id, exc)
             return None
