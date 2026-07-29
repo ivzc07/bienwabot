@@ -95,7 +95,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Text
 from rebe_agent.brain import Brain, BrainError
 from rebe_agent.chimeins import ChimeInBudget
 from rebe_agent.evolution import EvolutionError, EvolutionReader
-from rebe_agent.inbound import InboundMessage, Tier, fold_accents, tier
+from rebe_agent.inbound import InboundMessage, Tier, fold_accents, jid_number, tier
 from rebe_agent.memory import MEMORY_WINDOW, GroupMemory, Turn
 from rebe_agent.pacer import Pacer, SendRefusedError, SentMessage
 from rebe_agent.sends import SendKind
@@ -180,6 +180,17 @@ class ChimeInDecision(GateDecision):
 
     about_ai: bool
     """True only for AI, models, or AI tools. Not "tech", and not a near miss."""
+
+    speaking_to_rebe: bool
+    """The message is aimed at Rebe even though nothing mechanical caught it.
+
+    The mechanical tier gate knows her name spelled right and her JIDs; it does
+    not know that "Rene que hay de nuevo en noticias" - a live message, name
+    typo'd one letter off - was for her. Whether a message is *for somebody* is
+    a reading of the conversation, which is exactly what this call is. True
+    turns the message into a tier-one answer: no chime-in ration, because
+    nobody who asked her something is being volunteered at.
+    """
 
     no_go: bool
     """A guardrail topic, however much AI is wrapped around it.
@@ -294,9 +305,14 @@ confianza en vez de adivinar: quedarse callada cuesta menos que contestar mal.
 """.strip()
 
 CHATTER_RUBRIC = """
-Lees un mensaje de un grupo de WhatsApp. Nadie le habló a Rebe: es plática entre
-otras personas. Solo decides si el mensaje habla claramente de inteligencia
-artificial; no escribes ninguna respuesta.
+Lees un mensaje de un grupo de WhatsApp en el que está Rebe. A primera vista
+nadie le habló a ella. Solo clasificas; no escribes ninguna respuesta.
+
+speaking_to_rebe es true si en realidad el mensaje sí va dirigido a Rebe aunque
+no la nombre bien: su nombre escrito con un error o cambiado ("Rebw", "Rene",
+"reve"), o una petición que claramente le toca a ella por la plática ("contesta",
+"qué hay de noticias" cuando ella es la que comparte noticias). Si es plática
+entre otras personas o la mencionan sin hablarle a ella, es false.
 
 about_ai es true solo si el tema es IA: modelos, chatbots, herramientas de IA,
 empresas o laboratorios de IA, imágenes o texto generados, o lo que la IA está
@@ -418,6 +434,11 @@ class ReplyLeg:
         self._reader = reader
         self._memory = memory
         self._budget = budget
+        # Her `...@lid` identities per chat, resolved from the group roster the
+        # first time a mention or a quote needs them. Per process rather than
+        # persisted: a lid is stable, and one roster call per chat per restart
+        # is nothing.
+        self._lids: dict[str, frozenset[str]] = {}
         # Held for a whole event, model calls and typing pause included. Two
         # deliveries landing together would otherwise both read the window before
         # either wrote to it, and both would find that she had not spoken yet -
@@ -445,7 +466,7 @@ class ReplyLeg:
         history = [turn for turn in window if turn.message_id != message.message_id]
         hers = frozenset(turn.message_id for turn in window if turn.by_rebe and turn.message_id)
 
-        where = tier(message, hers=hers)
+        where = tier(message, hers=hers, aliases=await self._her_lids(message))
         if where is Tier.SILENT:
             # Her own echo, a private chat, or media with nothing readable in it.
             # The reply policy treats a picture or a voice note with no caption as
@@ -489,11 +510,25 @@ class ReplyLeg:
 
         The gate runs first, on every message with words in it, because "is this
         about AI" is the judgement and nothing cheaper is allowed to pre-empt it.
-        The shape rules and the day's budget run after it, and both of them are
-        about *her* rather than about the message: whether she has already spoken
-        here, and how many times she has spoken up uninvited today.
+        The gate can also overrule the tier itself: a message the mechanical
+        rules read as chatter but the model reads as aimed at her - a typo'd
+        name, an ask only she can answer - is handed to the tier-one path and
+        answered, with no ration spent. The shape rules and the day's budget run
+        after the gate, and both of them are about *her* rather than about the
+        message: whether she has already spoken here, and how many times she has
+        spoken up uninvited today.
         """
-        if not await self._eligible(message, history):
+        decision = await self._ask_the_gate(message, history, ChimeInDecision, CHATTER_RUBRIC)
+        if decision is None:
+            return None
+
+        if decision.speaking_to_rebe and decision.confidence >= MIN_CONFIDENCE:
+            logger.info(
+                "%s reads as aimed at her; answering rather than chiming in", message.message_id
+            )
+            return await self._answer(message, history)
+
+        if not self._eligible(decision, message.message_id):
             return None
 
         quiet = _shape_forbids(message, history, _thread(history, message.at))
@@ -566,7 +601,7 @@ class ReplyLeg:
             )
         return decision
 
-    async def _eligible(self, message: InboundMessage, history: Sequence[Turn]) -> bool:
+    def _eligible(self, decision: ChimeInDecision, message_id: str) -> bool:
         """Is this a conversation she would speak up in: the tier-two question.
 
         Narrower than tier one on both sides. It has to be clearly about AI, and
@@ -574,22 +609,18 @@ class ReplyLeg:
         AI gets nothing here, where an addressed one would get a short "ni idea".
         Nobody is left hanging by that silence, because nobody asked her.
         """
-        decision = await self._ask_the_gate(message, history, ChimeInDecision, CHATTER_RUBRIC)
-        if decision is None:
-            return False
-
         if decision.confidence < MIN_CONFIDENCE:
             logger.info(
                 "the gate is only %.2f sure about %s; not interrupting on a guess",
                 decision.confidence,
-                message.message_id,
+                message_id,
             )
             return False
         if not decision.about_ai:
-            logger.debug("%s is not about AI; nothing to chime in on", message.message_id)
+            logger.debug("%s is not about AI; nothing to chime in on", message_id)
             return False
         if decision.no_go:
-            logger.info("%s is a topic she stays out of; not volunteering", message.message_id)
+            logger.info("%s is a topic she stays out of; not volunteering", message_id)
             return False
         return True
 
@@ -643,6 +674,41 @@ class ReplyLeg:
             "answered %s in %s (%s)", message.author_name or message.author, message.chat, topic
         )
         return sent
+
+    async def _her_lids(self, message: InboundMessage) -> frozenset[str]:
+        """The `...@lid` identities that are her in this chat, cached per chat.
+
+        WhatsApp's lid addressing delivers an @-mention of her as an anonymous
+        lid that shares nothing with the phone JID the envelope names - the
+        group roster is where the two are written next to each other. Fetched
+        only when the message carries a mention or a quote, because those are
+        the two checks a lid can decide; a name in the text needs no roster.
+
+        A roster that cannot be fetched resolves to nothing and is asked for
+        again on the next message that needs it: her name and her phone number
+        still match what they always matched, so the failure costs at most one
+        lid mention, never the leg.
+        """
+        if message.from_me or not message.in_a_group:
+            return frozenset()
+        if not message.mentioned and not message.quoted_author:
+            return self._lids.get(message.chat, frozenset())
+
+        cached = self._lids.get(message.chat)
+        if cached is not None:
+            return cached
+        try:
+            roster = await self._reader.group_roster(message.chat)
+        except EvolutionError as exc:
+            logger.warning("no roster for %s; lid mentions go unrecognised: %s", message.chat, exc)
+            return frozenset()
+
+        number = jid_number(message.rebe)
+        lids = frozenset(lid for lid, phone in roster.items() if jid_number(phone) == number)
+        self._lids[message.chat] = lids
+        if not lids:
+            logger.warning("the roster for %s does not name %s", message.chat, message.rebe)
+        return lids
 
     async def _mark_read(self, message: InboundMessage) -> None:
         """Blue ticks before the answer. Never costs the reply if it fails.

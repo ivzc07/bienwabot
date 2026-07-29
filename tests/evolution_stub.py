@@ -19,6 +19,7 @@ PRESENCE_PATH = "/chat/sendPresence/"
 TEXT_PATH = "/message/sendText/"
 MEDIA_PATH = "/message/sendMedia/"
 READ_PATH = "/chat/markMessageAsRead/"
+ROSTER_PATH = "/group/participants/"
 
 BASE_URL = "http://bien-evo:8080"
 API_KEY = "evo-key-test"
@@ -76,6 +77,12 @@ class FakeEvolution:
         self.read_status: int | None = None
         """Set to fail only the read receipt, leaving the send working."""
 
+        self.participants: list[dict[str, Any]] = []
+        """What the group roster answers with: Evolution's `id` + `phoneNumber` rows."""
+
+        self.roster_status: int | None = None
+        """Set to fail only the roster fetch, leaving everything else working."""
+
     @property
     def presences(self) -> list[str]:
         return [call.presence for call in self.calls if call.is_presence]
@@ -101,7 +108,7 @@ class FakeEvolution:
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
-        known = (PRESENCE_PATH, TEXT_PATH, MEDIA_PATH, READ_PATH)
+        known = (PRESENCE_PATH, TEXT_PATH, MEDIA_PATH, READ_PATH, ROSTER_PATH)
         assert any(prefix in path for prefix in known), f"unexpected path {path}"
         body = json.loads(request.content) if request.content else {}
         self.calls.append(Call(path=path, body=body, api_key=request.headers.get("apikey")))
@@ -113,12 +120,16 @@ class FakeEvolution:
             status = self.media_status
         elif READ_PATH in path and self.read_status:
             status = self.read_status
+        elif ROSTER_PATH in path and self.roster_status:
+            status = self.roster_status
         if status >= 400:
             return httpx.Response(status, json={"error": "stub failure"})
         if TEXT_PATH in path or MEDIA_PATH in path:
             return httpx.Response(status, json={"key": {"id": self.message_id}})
         if READ_PATH in path:
             return httpx.Response(status, json={"message": "read"})
+        if ROSTER_PATH in path:
+            return httpx.Response(status, json={"participants": self.participants})
         return httpx.Response(status, json={"presence": body.get("presence")})
 
     def client(self) -> httpx.AsyncClient:
@@ -130,4 +141,6 @@ def _label(call: Call) -> str:
         return call.presence
     if call.is_media:
         return "media"
+    if ROSTER_PATH in call.path:
+        return "roster"
     return "read" if call.is_read else "text"

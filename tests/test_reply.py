@@ -46,7 +46,7 @@ from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, MEXICO_CITY, NOON, RecordingAlerter
 from tests.test_chimeins import Rolls
 from tests.test_config import COMPLETE_ENV
-from tests.webhooks import ANA, AT_EPOCH, edited, payload
+from tests.webhooks import ANA, AT_EPOCH, REBE, edited, payload
 
 SEED = 20260725
 
@@ -72,10 +72,23 @@ def verdict(topic: Topic | str = Topic.ON_TOPIC, confidence: float = 0.9) -> dic
     return json_output_response(json.dumps({"topic": str(topic), "confidence": confidence}))
 
 
-def about_ai(is_it: bool = True, *, no_go: bool = False, confidence: float = 0.9) -> dict[str, Any]:
-    """The tier-two gate's verdict on a message nobody addressed to her."""
+def about_ai(
+    is_it: bool = True,
+    *,
+    no_go: bool = False,
+    confidence: float = 0.9,
+    to_rebe: bool = False,
+) -> dict[str, Any]:
+    """The tier-two gate's verdict on a message nobody mechanically addressed to her."""
     return json_output_response(
-        json.dumps({"about_ai": is_it, "no_go": no_go, "confidence": confidence})
+        json.dumps(
+            {
+                "about_ai": is_it,
+                "no_go": no_go,
+                "speaking_to_rebe": to_rebe,
+                "confidence": confidence,
+            }
+        )
     )
 
 
@@ -341,6 +354,84 @@ async def test_a_quote_of_one_of_her_own_messages_is_answered(
     leg = make_leg(settings, FakeDeepSeek(verdict(), wrote()), evolution, memory, clock)
 
     assert await leg.handle(message("quote")) is not None
+
+
+REBE_LID = "30306094551155@lid"
+"""Her lid: the anonymous identity WhatsApp mentions her by in lid-addressed groups."""
+
+
+def _roster() -> list[dict[str, str]]:
+    """The group roster as Evolution reports it: lids beside phone numbers."""
+    return [
+        {"id": REBE_LID, "phoneNumber": REBE},
+        {"id": "164561806217420@lid", "phoneNumber": ANA},
+    ]
+
+
+async def test_a_lid_mention_is_answered_once_the_roster_names_her(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """WhatsApp's lid addressing delivers an @-mention of her as an anonymous
+    `...@lid` that shares nothing with the phone JID the envelope names. A live
+    mention was missed exactly this way; the group roster is the mapping."""
+    evolution.participants = _roster()
+    leg = make_leg(settings, FakeDeepSeek(verdict(), wrote()), evolution, memory, clock)
+
+    sent = await leg.handle(
+        message("mention", text="@30306094551155 que opinas?", mentioned=[REBE_LID])
+    )
+
+    assert sent is not None
+    assert evolution.texts == [VOICE]
+
+
+async def test_the_roster_is_fetched_once_per_chat(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """A lid is stable, so the mapping is asked for once and remembered."""
+    evolution.participants = _roster()
+    leg = make_leg(settings, _a_different_answer_each_time(2), evolution, memory, clock)
+
+    await leg.handle(message("mention", text="@30306094551155 hola", mentioned=[REBE_LID]))
+    clock.advance(timedelta(minutes=1))
+    await leg.handle(
+        message(
+            "mention",
+            text="@30306094551155 y esto?",
+            mentioned=[REBE_LID],
+            message_id="3EB0SECONDMENTION",
+            at_epoch=AT_EPOCH + 60,
+        )
+    )
+
+    assert len(evolution.texts) == 2
+    assert evolution.shape.count("roster") == 1
+
+
+async def test_a_dead_roster_costs_the_lid_mention_not_the_leg(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """Evolution refusing the roster degrades to what the gate always knew - the
+    name and the phone number - so the lid mention falls to chatter and silence
+    instead of taking the event down."""
+    evolution.roster_status = 500
+    leg = make_leg(settings, FakeDeepSeek(about_ai(False)), evolution, memory, clock)
+
+    quiet = await leg.handle(
+        message("mention", text="@30306094551155 hola", mentioned=[REBE_LID])
+    )
+
+    assert quiet is None
+    assert evolution.texts == []
 
 
 async def test_the_send_is_recorded_as_a_reply_not_as_a_post(
@@ -1106,6 +1197,42 @@ async def test_a_chime_in_is_told_that_nobody_asked_her(
     written = _instructions(fake.requests[-1])
     assert "Nadie te habló a ti" in written
     assert "Alguien te habló directo" not in written
+
+
+async def test_a_typoed_name_is_still_an_address(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """"Rene que hay de nuevo en noticias" went unanswered live: one letter off
+    her name, invisible to the mechanical gate. The chatter gate reads the
+    conversation, so its verdict that the message was for her makes it tier one
+    - answered under the addressed framing, with no chime-in ration spent."""
+    fake = FakeDeepSeek(about_ai(False, to_rebe=True), verdict(), wrote())
+    budget = make_budget(clock, NO)  # a roll that would refuse any chime-in
+    leg = make_leg(settings, fake, evolution, memory, clock, budget=budget)
+
+    sent = await leg.handle(message("chatter", text="Rene que hay de nuevo en noticias"))
+
+    assert sent is not None
+    assert evolution.texts == [VOICE]
+    assert "Alguien te habló directo" in _instructions(fake.requests[-1])
+
+
+async def test_an_unsure_aimed_at_her_guess_does_not_interrupt(
+    settings: Settings,
+    evolution: FakeEvolution,
+    memory: InMemoryGroupMemory,
+    clock: ManualClock,
+) -> None:
+    """Promoting chatter to an address is the one place a guess interrupts
+    people who were not talking to her, so it keeps the confidence floor."""
+    fake = FakeDeepSeek(about_ai(False, to_rebe=True, confidence=0.3))
+    leg = make_leg(settings, fake, evolution, memory, clock)
+
+    assert await leg.handle(message("chatter", text="rene traeme un cafe")) is None
+    assert evolution.texts == []
 
 
 def _another_ai_message(turn: int) -> InboundMessage:

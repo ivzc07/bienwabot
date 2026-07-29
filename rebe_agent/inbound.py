@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Container, Mapping
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -212,40 +212,49 @@ def _reason(data: Mapping[str, Any]) -> int | None:
     return None
 
 
-def tier(message: InboundMessage, *, hers: Container[str]) -> Tier:
+def tier(
+    message: InboundMessage, *, hers: Container[str], aliases: Iterable[str] = ()
+) -> Tier:
     """Which tier this message falls in. `hers` is the ids of Rebe's own messages.
 
     Quoting is checked against what she remembers sending as well as against the
     quoted author's JID, so a reply to her still counts when Evolution omits the
     author or when the instance's own number is not in the envelope.
+
+    `aliases` is every other JID that is her - in practice the `...@lid` WhatsApp
+    now addresses her by in groups, resolved from the group roster. A mention or
+    a quote carries whichever identity the sender's client had, so both are
+    checked against all of them. Empty is safe: the roster is best-effort, and
+    without it the name and the phone number still catch what they always did.
     """
     if message.from_me or not message.in_a_group or not message.text.strip():
         return Tier.SILENT
-    if _addressed(message, hers):
+    if _addressed(message, hers, aliases):
         return Tier.ADDRESSED
     return Tier.CHATTER
 
 
-def _addressed(message: InboundMessage, hers: Container[str]) -> bool:
+def _addressed(message: InboundMessage, hers: Container[str], aliases: Iterable[str]) -> bool:
     """The three forms of a name-tag, from the reply policy's tier one."""
     if message.quoted_id and message.quoted_id in hers:
         return True
-    number = _number(message.rebe)
-    if number and _number(message.quoted_author) == number:
+    numbers = {number for jid in (message.rebe, *aliases) if (number := jid_number(jid))}
+    if numbers and jid_number(message.quoted_author) in numbers:
         return True
-    if number and any(_number(jid) == number for jid in message.mentioned):
+    if numbers and any(jid_number(jid) in numbers for jid in message.mentioned):
         return True
-    if number and f"@{number}" in message.text:
+    if any(f"@{number}" in message.text for number in numbers):
         return True
     return _HER_NAME.search(fold_accents(message.text)) is not None
 
 
-def _number(jid: str) -> str:
-    """The phone number inside a JID, without the device suffix or the domain.
+def jid_number(jid: str) -> str:
+    """The bare number inside a JID, without the device suffix or the domain.
 
     `5215551234567:12@s.whatsapp.net` and `5215551234567@s.whatsapp.net` are the
     same person on two of their devices, and a mention carries whichever the
-    sender's client had to hand.
+    sender's client had to hand. Public because the reply leg matches the group
+    roster's phone JIDs against the envelope's the same way.
     """
     return jid.split("@", 1)[0].split(":", 1)[0].strip()
 
