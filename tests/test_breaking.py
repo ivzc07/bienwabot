@@ -338,7 +338,7 @@ async def test_a_big_story_still_waits_out_the_hourly_ceiling(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     clock = ManualClock(at(AFTERNOON))
-    stack = build(clock, Pool(TOP_OF_HN))
+    stack = build(clock, Pool(TOP_OF_HN), envelope=Envelope(sends_per_hour=3))
     for offset, text in ((50, "una"), (40, "dos"), (30, "tres")):
         await seed_send(stack.sends, clock.now() - timedelta(minutes=offset), text=text)
 

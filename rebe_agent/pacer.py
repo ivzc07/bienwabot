@@ -167,15 +167,21 @@ class Window:
 class Envelope:
     """The ceilings and windows from section 2 of the anti-ban playbook.
 
-    Defaults are the shipped balanced posture. They are parameters rather than
-    constants because the post-pairing ramp tightens them for the first two weeks
-    of automation, and because a test that wants to exercise one rule needs the
+    Defaults are the shipped posture. They are parameters rather than constants
+    because the post-pairing ramp tightens them for the first two weeks of
+    automation, and because a test that wants to exercise one rule needs the
     others out of its way.
+
+    The hourly and daily ceilings were 3 and 12 - the playbook's balanced
+    numbers - until the always-answer reply policy made them the thing silencing
+    her mid-conversation. The operator chose conversation over caution: they now
+    sit high enough that an ordinary day never meets them, and the per-minute
+    floor plus the typing pauses stay as the burst protection.
     """
 
     sends_per_minute: int = 4
-    sends_per_hour: int = 3
-    sends_per_day: int = 12
+    sends_per_hour: int = 30
+    sends_per_day: int = 100
     post_gap: tuple[timedelta, timedelta] = (timedelta(minutes=75), timedelta(minutes=90))
     overnight_hold: Window = Window(time(23, 0), time(8, 0))
     night_hush: Window = Window(time(2, 0), time(6, 0))
@@ -186,7 +192,7 @@ class Envelope:
         """How far apart two sends normally sit: the hourly ceiling, spread out.
 
         The playbook asks for "slow 4-6x" overnight without naming what the 1x
-        is. This is it - three an hour is one every twenty minutes - so the hush
+        is. This is it - thirty an hour is one every two minutes - so the hush
         is a real rate change rather than a longer pause that changes nothing.
         """
         return HOUR / self.sends_per_hour

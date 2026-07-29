@@ -89,6 +89,10 @@ def pacer(
 ROOMY = Envelope(sends_per_hour=1000, sends_per_day=1000, post_gap=(timedelta(0), timedelta(0)))
 """The ceilings lifted, so a test can exercise exactly one rule at a time."""
 
+TIGHT = Envelope(sends_per_hour=3)
+"""An hourly ceiling low enough to reach in a test. The shipped envelope sits
+too high to meet without seeding thirty sends; the rule itself is unchanged."""
+
 
 async def seed_send(
     log: InMemorySendLog,
@@ -245,13 +249,13 @@ async def test_the_small_hours_space_sends_four_to_six_times_further_apart(
 ) -> None:
     """ "Slow 4-6x" needs a 1x to be four to six times slower than.
 
-    The shipped envelope is the one thing these hush tests must not lift: the
-    spacing the hush multiplies is the hourly ceiling spread out, so three an
-    hour means one send every twenty minutes by day, and eighty to a hundred and
-    twenty minutes at three in the morning.
+    The `TIGHT` envelope pins that 1x: the spacing the hush multiplies is the
+    hourly ceiling spread out, so three an hour means one send every twenty
+    minutes by day, and eighty to a hundred and twenty minutes at three in the
+    morning.
     """
     clock.set(datetime(2026, 7, 25, 3, 0, tzinfo=MEXICO_CITY))
-    pacer = make_pacer(evolution, log, clock, sleeper)
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=TIGHT)
     await seed_send(log, clock.now() - timedelta(minutes=25), kind=SendKind.REPLY, text="antes")
 
     with pytest.raises(SendRefusedError) as refused:
@@ -270,7 +274,7 @@ async def test_the_same_gap_in_the_afternoon_is_perfectly_normal(
     evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
 ) -> None:
     """The control for the test above: same envelope, same gap, different hour."""
-    pacer = make_pacer(evolution, log, clock, sleeper)
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=TIGHT)
     await seed_send(log, clock.now() - timedelta(minutes=25), kind=SendKind.REPLY, text="antes")
 
     daytime = await pacer.send(SendKind.REPLY, GROUP, MESSAGE)
@@ -284,7 +288,7 @@ async def test_the_hush_holds_its_answer_still_when_a_caller_keeps_asking(
 ) -> None:
     """Same reason as the post gap: a threshold redrawn per attempt is no threshold."""
     clock.set(datetime(2026, 7, 25, 3, 0, tzinfo=MEXICO_CITY))
-    pacer = make_pacer(evolution, log, clock, sleeper)
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=TIGHT)
     await seed_send(log, clock.now() - timedelta(minutes=25), kind=SendKind.REPLY, text="antes")
 
     waits = []
@@ -339,9 +343,10 @@ async def test_four_in_a_minute_are_not_held_back(
 
 
 async def test_the_hourly_ceiling_counts_posts_and_replies_together(
-    pacer: Pacer, log: InMemorySendLog, clock: ManualClock
+    evolution: FakeEvolution, log: InMemorySendLog, clock: ManualClock, sleeper: ManualSleeper
 ) -> None:
     """Two limiters, one per leg, would each stay under three and together send six."""
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=TIGHT)
     await seed_send(log, clock.now() - timedelta(minutes=40), kind=SendKind.POST, text="uno")
     await seed_send(log, clock.now() - timedelta(minutes=30), kind=SendKind.REPLY, text="dos")
     await seed_send(log, clock.now() - timedelta(minutes=20), kind=SendKind.REPLY, text="tres")
@@ -362,7 +367,7 @@ async def test_a_photo_fills_the_same_ceiling_it_is_refused_by(
     The hour is filled with replies so the post-to-post gap, which would refuse
     a second post long before the ceiling matters, stays out of the way.
     """
-    pacer = make_pacer(evolution, log, clock, sleeper)
+    pacer = make_pacer(evolution, log, clock, sleeper, envelope=TIGHT)
     await seed_send(log, clock.now() - timedelta(minutes=40), kind=SendKind.REPLY, text="uno")
     await seed_send(log, clock.now() - timedelta(minutes=30), kind=SendKind.REPLY, text="dos")
     await seed_send(log, clock.now() - timedelta(minutes=20), kind=SendKind.REPLY, text="tres")
