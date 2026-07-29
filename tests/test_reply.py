@@ -184,6 +184,39 @@ def test_a_reply_is_one_short_line() -> None:
     assert render(Reply(text="  jaja  no creo   "), Topic.ON_TOPIC) == "jaja no creo"
 
 
+def test_a_laugh_is_hers_when_she_has_not_laughed_lately() -> None:
+    assert (
+        render(Reply(text="jaja no creo"), Topic.ON_TOPIC, laughed_lately=False) == "jaja no creo"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tic", "kept"),
+    [
+        ("jaja no creo", "no creo"),
+        ("Jajaja, yo también lo pensé", "yo también lo pensé"),
+        ("no manches jeje", "no manches"),
+    ],
+)
+def test_a_second_laugh_is_stripped_not_sent(tic: str, kept: str) -> None:
+    """The tic that made the group notice her: a laugh in every message. When her
+    own recent turns already laughed, the new laugh goes and the answer stays."""
+    assert render(Reply(text=tic), Topic.ON_TOPIC, laughed_lately=True) == kept
+
+
+def test_a_reply_that_is_only_another_laugh_is_dropped() -> None:
+    with pytest.raises(ReplyRejectedError, match="laugh"):
+        render(Reply(text="jajaja"), Topic.ON_TOPIC, laughed_lately=True)
+
+
+def test_a_jarabe_is_not_a_laugh() -> None:
+    """Ordinary words that start with the laugh's letters must survive the strip."""
+    assert (
+        render(Reply(text="me pidieron un jarabe jaja"), Topic.ON_TOPIC, laughed_lately=True)
+        == "me pidieron un jarabe"
+    )
+
+
 def test_an_essay_is_not_a_whatsapp_reply() -> None:
     with pytest.raises(ReplyRejectedError, match="characters"):
         render(Reply(text="a" * (MAX_REPLY_CHARS + 1)), Topic.ON_TOPIC)
