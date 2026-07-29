@@ -86,7 +86,9 @@ unusable, which on 2026-07-28 cost three tier-one replies in twenty minutes:
 DeepSeek returned whitespace `content` with a handful of tokens billed, while
 the same request minutes later answered fine. A second sample of a flaky
 provider is cheap insurance; a second sample of a hard down one fails the same
-way and the call is no worse off than before. There is no backoff on purpose:
+way and the call is no worse off than before. The second ask names the first
+answer's fault (`_second_try_prompt`), because on 2026-07-29 a blind resample
+reproduced the same malformed JSON it was retrying. There is no backoff on purpose:
 a wait long enough to ride out a real outage belongs to a redesign of the
 reply path, not to this loop, and the group is not waiting fewer seconds for
 having been made to wait more.
@@ -141,6 +143,28 @@ def _why(exc: BaseException) -> str:
 def _clip(detail: str, limit: int = 600) -> str:
     collapsed = " ".join(detail.split())
     return collapsed if len(collapsed) <= limit else f"{collapsed[:limit]}..."
+
+
+def _second_try_prompt(prompt: str, unusable: BaseException) -> str:
+    """The same ask again, with the first answer's fault named.
+
+    On 2026-07-29 a news post died twice on the same fault: the model opened
+    its text with a quotation mark and did not escape it, so the JSON string
+    closed at that quote and the rest of the answer was garbage. A blind retry
+    is only insurance against a flaky provider - a second sample of the same
+    prompt at the same temperature reproduced the same habit. Naming the fault
+    is what makes the retry insurance against the model too, the way `news`
+    already sends `render`'s rejections back in the model's own words.
+
+    `_why` supplies the fault, which quotes the broken answer itself (bounded);
+    the model correcting its own visible output is the whole mechanism.
+    """
+    return (
+        f"{prompt}\n\n"
+        f"Tu respuesta anterior no se pudo usar ({_why(unusable)}). "
+        "Contesta de nuevo con el objeto JSON pedido, y nada más: JSON válido, "
+        'con toda comilla dentro del texto escapada como \\".'
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +343,7 @@ class Brain:
         )
 
         billed = 0
+        ask_prompt = prompt
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 reservation = await self._guard.reserve(call_type)
@@ -339,7 +364,7 @@ class Brain:
             tally = RunUsage()
             try:
                 result = await agent.run(
-                    prompt,
+                    ask_prompt,
                     model_settings=settings,
                     message_history=list(message_history) if message_history else None,
                     usage=tally,
@@ -367,6 +392,7 @@ class Brain:
             # and transport failures took the branch above; a provider that is
             # down hard does not get asked twice per call.
             if attempt < MAX_ATTEMPTS:
+                ask_prompt = _second_try_prompt(prompt, unusable)
                 logger.info(
                     "DeepSeek %s call %d came back unusable; one more try",
                     call_type,
