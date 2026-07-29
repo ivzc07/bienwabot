@@ -121,6 +121,16 @@ class EvolutionReader(Protocol):
         reply that never went out is worse than a receipt that never showed.
         """
 
+    async def group_roster(self, chat: str) -> dict[str, str]:
+        """The group's members as `lid JID -> phone JID`, best-effort.
+
+        WhatsApp's lid addressing means an @-mention arrives as an anonymous
+        `...@lid` that shares nothing with the phone JID the envelope names, and
+        this roster is the only place the two are written next to each other.
+        Entries with no phone number are dropped rather than guessed at. Raises
+        `EvolutionError` if the transport will not answer.
+        """
+
 
 class EvolutionClient:
     """A thin, typed client for the one instance this process posts from."""
@@ -186,6 +196,28 @@ class EvolutionClient:
             action="mark a message read",
         )
 
+    async def group_roster(self, chat: str) -> dict[str, str]:
+        """The group's members as `lid JID -> phone JID`.
+
+        A GET, unlike everything else here, because that is the verb the endpoint
+        answers to. Members Evolution lists without a phone number are left out:
+        a mapping to nothing identifies nobody.
+        """
+        payload = await self._get(
+            f"/group/participants/{self._instance}",
+            {"groupJid": chat},
+            action="fetch the group roster",
+        )
+        roster: dict[str, str] = {}
+        participants = payload.get("participants")
+        for member in participants if isinstance(participants, list) else []:
+            if not isinstance(member, dict):
+                continue
+            lid, phone = member.get("id"), member.get("phoneNumber")
+            if isinstance(lid, str) and lid and isinstance(phone, str) and phone:
+                roster[lid] = phone
+        return roster
+
     async def send_text(self, chat: str, text: str) -> str:
         """Send one text message, and answer with the WhatsApp message ID."""
         payload = await self._post(
@@ -216,14 +248,24 @@ class EvolutionClient:
             )
         except httpx.HTTPError as exc:
             raise EvolutionError(action, detail=str(exc)) from exc
+        return self._answer(response, action)
 
+    async def _get(self, path: str, params: dict[str, str], *, action: str) -> dict[str, Any]:
+        try:
+            response = await self._http.get(
+                f"{self._base_url}{path}", params=params, headers=self._headers
+            )
+        except httpx.HTTPError as exc:
+            raise EvolutionError(action, detail=str(exc)) from exc
+        return self._answer(response, action)
+
+    def _answer(self, response: httpx.Response, action: str) -> dict[str, Any]:
         if response.status_code in RATE_LIMIT_STATUSES:
             raise EvolutionRateLimitedError(
                 action, status=response.status_code, detail=_describe(response)
             )
         if response.status_code >= 400:
             raise EvolutionError(action, status=response.status_code, detail=_describe(response))
-
         return _payload(response)
 
 
