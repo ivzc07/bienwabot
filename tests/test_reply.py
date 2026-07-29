@@ -426,9 +426,7 @@ async def test_a_dead_roster_costs_the_lid_mention_not_the_leg(
     evolution.roster_status = 500
     leg = make_leg(settings, FakeDeepSeek(about_ai(False)), evolution, memory, clock)
 
-    quiet = await leg.handle(
-        message("mention", text="@30306094551155 hola", mentioned=[REBE_LID])
-    )
+    quiet = await leg.handle(message("mention", text="@30306094551155 hola", mentioned=[REBE_LID]))
 
     assert quiet is None
     assert evolution.texts == []
@@ -1205,7 +1203,7 @@ async def test_a_typoed_name_is_still_an_address(
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    """"Rene que hay de nuevo en noticias" went unanswered live: one letter off
+    """ "Rene que hay de nuevo en noticias" went unanswered live: one letter off
     her name, invisible to the mechanical gate. The chatter gate reads the
     conversation, so its verdict that the message was for her makes it tier one
     - answered under the addressed framing, with no chime-in ration spent."""

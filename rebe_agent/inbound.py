@@ -212,9 +212,7 @@ def _reason(data: Mapping[str, Any]) -> int | None:
     return None
 
 
-def tier(
-    message: InboundMessage, *, hers: Container[str], aliases: Iterable[str] = ()
-) -> Tier:
+def tier(message: InboundMessage, *, hers: Container[str], aliases: Iterable[str] = ()) -> Tier:
     """Which tier this message falls in. `hers` is the ids of Rebe's own messages.
 
     Quoting is checked against what she remembers sending as well as against the
