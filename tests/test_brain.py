@@ -33,6 +33,13 @@ class NewsPost(BaseModel):
 
 VALID_POST = '{"framing": "Ojo", "line": "Sale un modelo nuevo.", "url": "https://x.mx/a"}'
 
+UNESCAPED_QUOTE_POST = (
+    '{"framing": ":" se ve denso pero promete", "line": "variantes nuevas.", '
+    '"url": "https://x.mx/a"}'
+)
+"""The 2026-07-29 failure shape: the model opened its text with a quotation mark
+and did not escape it, so the JSON string closes early and the rest is garbage."""
+
 
 @pytest.fixture
 def settings() -> Settings:
@@ -224,6 +231,42 @@ async def test_an_unusable_answer_earns_one_more_try(
     assert post.framing == "Ojo"
     assert len(fake.requests) == 2
     assert await store.calls_on(TODAY) == 2
+
+
+async def test_the_second_try_is_told_what_was_wrong_with_the_first(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The 2026-07-29 incident: DeepSeek opened the post with an unescaped
+    quotation mark, the JSON broke at that quote, and the blind retry - same
+    prompt, same temperature - produced the same fault and the item was
+    dropped. The second try now restates the ask with the first failure named,
+    so the model is corrected rather than merely re-rolled."""
+    fake = FakeDeepSeek(
+        json_output_response(UNESCAPED_QUOTE_POST), json_output_response(VALID_POST)
+    )
+
+    post = await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    assert post.framing == "Ojo"
+    first, second = (request["messages"][-1]["content"] for request in fake.requests)
+    assert first == "resume"
+    assert second.startswith("resume")
+    assert "Invalid JSON" in second
+    assert '\\"' in second
+
+
+async def test_a_blank_answer_retry_also_carries_the_failure(
+    settings: Settings, store: InMemoryUsageStore
+) -> None:
+    """The note is not quote-specific: whatever made the first answer unusable
+    is what the second ask names."""
+    fake = FakeDeepSeek(json_output_response(" \n"), json_output_response(VALID_POST))
+
+    await brain_for(settings, fake, store).ask(CallType.NEWS_SUMMARY, "resume", NewsPost)
+
+    second = fake.requests[1]["messages"][-1]["content"]
+    assert second.startswith("resume")
+    assert "no se pudo usar" in second
 
 
 async def test_a_second_unusable_answer_is_a_failure(
