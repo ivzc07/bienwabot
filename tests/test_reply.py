@@ -46,7 +46,7 @@ from tests.evolution_stub import API_KEY, BASE_URL, INSTANCE, FakeEvolution
 from tests.support import GROUP, MEXICO_CITY, NOON, RecordingAlerter
 from tests.test_chimeins import Rolls
 from tests.test_config import COMPLETE_ENV
-from tests.webhooks import ANA, AT_EPOCH, BETO, edited, payload
+from tests.webhooks import ANA, AT_EPOCH, edited, payload
 
 SEED = 20260725
 
@@ -571,20 +571,20 @@ async def test_a_generation_that_fails_after_the_gate_is_also_silence(
     assert evolution.reads == ["3EB0A1B2C3D4E5F60002"], "she read it, then said nothing"
 
 
-async def test_a_low_confidence_classification_is_silence(
+async def test_a_low_confidence_classification_still_answers_when_addressed(
     settings: Settings,
     evolution: FakeEvolution,
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    """Ambiguity fails toward quiet, and this is the one thing that overrides
-    "always answers when addressed"."""
+    """A hedged gate is not a broken one. She was tagged, so the best guess is
+    answered rather than swallowed: only a system failure buys silence here."""
     leg = make_leg(
         settings, FakeDeepSeek(verdict(confidence=0.2), wrote()), evolution, memory, clock
     )
 
-    assert await leg.handle(message("by_name")) is None
-    assert evolution.texts == []
+    assert await leg.handle(message("by_name")) is not None
+    assert evolution.texts == [VOICE]
 
 
 async def test_a_refused_send_leaves_no_trace_in_the_group(
@@ -1156,56 +1156,45 @@ async def test_a_redelivered_webhook_does_not_answer_twice(
     assert len(evolution.texts) == 1
 
 
-async def test_she_does_not_answer_the_same_person_twice_running(
+async def test_the_same_person_tagging_twice_gets_two_answers(
     settings: Settings,
     evolution: FakeEvolution,
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    """Two messages arrive together and she answers the first. The second was
-    written before her answer, so answering it too would be two of hers in a row."""
-    fake = FakeDeepSeek(verdict(), wrote(), verdict(), wrote())
-    leg = make_leg(settings, fake, evolution, memory, clock)
+    """Two name-tags arrive in one breath and both are answered. The never-twice
+    shape rule rations volunteering, and neither of these was volunteered."""
+    leg = make_leg(settings, _a_different_answer_each_time(2), evolution, memory, clock)
 
     await leg.handle(message("by_name"))
     second = await leg.handle(
         message("by_name", text="rebe y tambien esto", message_id="3EB0SAMEBREATH")
     )
 
-    assert second is None
-    assert len(evolution.texts) == 1
-
-
-async def test_somebody_else_speaking_up_is_not_twice_in_a_row(
-    settings: Settings,
-    evolution: FakeEvolution,
-    memory: InMemoryGroupMemory,
-    clock: ManualClock,
-) -> None:
-    """The rule is about the same person, not about her."""
-    fake = FakeDeepSeek(verdict(), wrote(), verdict(), wrote("va, yo digo que si"))
-    leg = make_leg(settings, fake, evolution, memory, clock)
-
-    await leg.handle(message("by_name"))
-    second = await leg.handle(
-        message("by_name", text="rebe tu que dices", author=BETO, message_id="3EB0FROMBETO")
-    )
-
     assert second is not None
     assert len(evolution.texts) == 2
 
 
-async def test_a_thread_fades_after_a_few_turns(
+async def test_a_tagged_thread_never_fades(
     settings: Settings,
     evolution: FakeEvolution,
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    """She answers a follow-up or two and then lets it die - with no closing
-    message, which is what a human putting the phone down looks like."""
-    leg = make_leg(settings, _a_different_answer_each_time(6), evolution, memory, clock)
+    """The thread fade rations volunteering, and none of these are volunteered:
+    somebody still tagging her five messages deep still gets answered. The
+    hourly ceiling is the envelope's own rule, so it is lifted out of the way."""
+    turns = THREAD_TURNS + 2
+    leg = make_leg(
+        settings,
+        _a_different_answer_each_time(turns),
+        evolution,
+        memory,
+        clock,
+        envelope=Envelope(sends_per_hour=100, post_gap=(timedelta(0), timedelta(0))),
+    )
 
-    for turn in range(THREAD_TURNS + 2):
+    for turn in range(turns):
         clock.advance(timedelta(minutes=1))
         await leg.handle(
             message(
@@ -1216,41 +1205,7 @@ async def test_a_thread_fades_after_a_few_turns(
             )
         )
 
-    assert len(evolution.texts) == THREAD_TURNS
-    assert not any("adios" in text.lower() for text in evolution.texts)
-
-
-async def test_a_thread_that_went_quiet_starts_again(
-    settings: Settings,
-    evolution: FakeEvolution,
-    memory: InMemoryGroupMemory,
-    clock: ManualClock,
-) -> None:
-    """The fade is per thread, not per group: an hour later is a new conversation."""
-    leg = make_leg(settings, _a_different_answer_each_time(8), evolution, memory, clock)
-    for turn in range(THREAD_TURNS):
-        clock.advance(timedelta(minutes=1))
-        await leg.handle(
-            message(
-                "by_name",
-                text=f"rebe cuentame lo numero {turn}",
-                message_id=f"3EB0EARLY{turn}",
-                at_epoch=AT_EPOCH + 120 * (turn + 1),
-            )
-        )
-
-    clock.advance(timedelta(hours=3))
-    later = await leg.handle(
-        message(
-            "by_name",
-            text="rebe ya volvi, que hubo",
-            message_id="3EB0LATER",
-            at_epoch=AT_EPOCH + 10_800,
-        )
-    )
-
-    assert later is not None
-    assert len(evolution.texts) == THREAD_TURNS + 1
+    assert len(evolution.texts) == turns
 
 
 async def test_the_thread_so_far_is_handed_back_to_the_model(
@@ -1315,22 +1270,22 @@ async def test_her_own_news_post_joins_the_window_as_hers(
     assert evolution.calls == []
 
 
-async def test_two_deliveries_at_once_are_still_one_reply(
+async def test_two_deliveries_at_once_are_each_answered_exactly_once(
     settings: Settings,
     evolution: FakeEvolution,
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    """Both arrive before either has been answered. Run concurrently they would
-    each read a window in which she had not spoken yet, and both would send."""
-    leg = make_leg(settings, _a_different_answer_each_time(4), evolution, memory, clock)
+    """Both arrive before either has been answered. The turnstile serialises
+    them, so each name-tag gets its one answer and neither is answered twice."""
+    leg = make_leg(settings, _a_different_answer_each_time(2), evolution, memory, clock)
 
     await asyncio.gather(
         leg.handle(message("by_name")),
         leg.handle(message("by_name", text="rebe y tambien esto", message_id="3EB0ATONCE")),
     )
 
-    assert len(evolution.texts) == 1
+    assert len(evolution.texts) == 2
 
 
 def _a_different_answer_each_time(turns: int) -> FakeDeepSeek:
