@@ -134,7 +134,7 @@ jobs:
         run: |
           docker run --rm --env-file .env.ci --entrypoint python rebe-agent:ci \
             -c 'from rebe_agent.pacer import Envelope; e = Envelope(); print("envelope", e.sends_per_minute, e.sends_per_hour, e.sends_per_day)' \
-            | grep -q 'envelope 4 3 12'
+            | grep -q 'envelope 4 30 100'
           docker run --rm --env-file .env.ci rebe-agent:ci --help | grep -q -- '--say'
 
       # And the news leg: its sources are a list in the image, not a config file,
