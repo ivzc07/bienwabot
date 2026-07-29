@@ -4,7 +4,7 @@ Two of the reply policy's three tiers end up here, and they share every step
 except the question the model is asked and the budget that answers back.
 
     remember the turn -> tier gate -> soft pause
-      addressed:  conversation shape -> classify -> mark read -> generate
+      addressed:  classify -> mark read -> generate
       chatter:    is it about AI? -> conversation shape -> the day's budget
                   -> mark read -> generate
     -> validate -> send through the shared pacer -> remember hers
@@ -34,13 +34,17 @@ kind of address this is, tier two asks the narrower question of whether the
 message is clearly about AI, because "tech she'd have an opinion on" is a fine
 reason to answer somebody who asked her and much too wide a reason to interrupt.
 
-**Everything fails toward silence.** A gate that errors, a classification that is
-not confident, a generation that comes back empty or unusable, an envelope that
-says no, a transport that is down: all of them end this function with `None` and
-nothing in the group. `docs/wayfinder/reply-policy-spec.md` is explicit that this
-overrides "she always answers when addressed" - a dropped reply looks like she
-put her phone down, a broken one looks like a bot - and that there are no error
-messages in the group, ever.
+**A name-tag is always answered; only a broken system overrides that.** The
+conversation-shape rules - the thread fade, never twice in a row to the same
+person - and the confidence floor belong to the chime-in tier now: they are about
+whether she should *volunteer*, and somebody who tagged her is not being
+volunteered at. A gate that is unsure about an addressed message still answers
+with its best guess, because every topic's guidance is safe to be wrong in and a
+name-tag left hanging is its own tell. What still ends an addressed event with
+`None` is the system failing: a gate or generation that errors, an answer that
+comes back empty or unusable, an envelope that says no, a transport that is
+down. A dropped reply looks like she put her phone down, a broken one looks
+like a bot - and there are no error messages in the group, ever.
 
 **The read receipt goes out once the gate has said yes, before generation.** That
 is the order section 3 of the deployment spec draws, and it is also the human
@@ -115,11 +119,14 @@ was given anything to check against, because a chat reply has no source item the
 way a news post does. Two digits or fewer is ordinary speech: "gpt 5", "los 2"."""
 
 MIN_CONFIDENCE = 0.5
-"""Below this the classification is a guess, and the failure posture says quiet."""
+"""Below this the classification is a guess. A guess is enough to answer somebody
+who tagged her - every topic's guidance is safe to be wrong in - but not enough
+to interrupt a conversation nobody invited her into, so only the chime-in tier
+turns it into silence."""
 
 THREAD_TURNS = 3
-"""How many times she answers inside one thread before letting it fade. The reply
-policy asks for "a follow-up or two, then it dies" - and no closing message."""
+"""How many of her turns a thread can hold before she stops volunteering in it.
+Chime-in only: somebody still tagging her four messages deep gets answered."""
 
 THREAD_GAP = timedelta(minutes=30)
 """A silence this long ends a thread. The next message opens a new one, which the
@@ -458,17 +465,18 @@ class ReplyLeg:
         return await self._chime_in(message, history)
 
     async def _answer(self, message: InboundMessage, history: Sequence[Turn]) -> SentMessage | None:
-        """Tier one: she was addressed, so she answers unless something is broken."""
-        thread = _thread(history, message.at)
-        quiet = _shape_forbids(message, history, thread)
-        if quiet is not None:
-            logger.info("not answering %s: %s", message.message_id, quiet.reason)
-            return None
+        """Tier one: she was addressed, so she answers unless something is broken.
 
+        No shape rules and no confidence floor here: those ration volunteering,
+        and somebody who tagged her asked. The one silence that survives is a
+        no-go topic she has already deflected in this thread - a second "ni idea"
+        to somebody pressing the same subject is the bait the reply policy says
+        she drops off from quietly.
+        """
         decision = await self._classify(message, history)
         if decision is None:
             return None
-        if decision.topic is Topic.NO_GO and _already_deflected(thread):
+        if decision.topic is Topic.NO_GO and _already_deflected(_thread(history, message.at)):
             logger.info("no-go topic already deflected in this thread; dropping it")
             return None
 
@@ -523,14 +531,14 @@ class ReplyLeg:
         answer: type[DecisionT],
         rubric: str,
     ) -> DecisionT | None:
-        """Call B, however it is being asked, or `None` for stay quiet.
+        """Call B, however it is being asked, or `None` for a gate that broke.
 
-        One call, one call type and one confidence floor for both tiers: what
-        differs between them is the rubric and the shape of the answer, and a
-        gate that errored or hedged means the same thing either way.
+        One call and one call type for both tiers: what differs is the rubric,
+        the shape of the answer, and what a hedge means - so the confidence
+        floor belongs to the callers, and only an errored gate is `None` here.
         """
         try:
-            decision = await self._brain.ask(
+            return await self._brain.ask(
                 CallType.REPLY_GATE,
                 _gate_prompt(message, history),
                 answer,
@@ -540,20 +548,23 @@ class ReplyLeg:
             logger.info("the gate gave no verdict on %s: %s", message.message_id, exc)
             return None
 
-        if decision.confidence < MIN_CONFIDENCE:
-            logger.info(
-                "the gate is only %.2f sure about %s; staying quiet",
-                decision.confidence,
-                message.message_id,
-            )
-            return None
-        return decision
-
     async def _classify(
         self, message: InboundMessage, history: Sequence[Turn]
     ) -> ReplyDecision | None:
-        """What kind of address this is: the tier-one question."""
-        return await self._ask_the_gate(message, history, ReplyDecision, RUBRIC)
+        """What kind of address this is: the tier-one question.
+
+        A hedged verdict is still a verdict. She was tagged, so the best guess
+        is answered rather than swallowed: every topic's guidance deflects or
+        opines safely, and the render checks catch what the guess cannot.
+        """
+        decision = await self._ask_the_gate(message, history, ReplyDecision, RUBRIC)
+        if decision is not None and decision.confidence < MIN_CONFIDENCE:
+            logger.info(
+                "the gate is only %.2f sure about %s; answering with its best guess",
+                decision.confidence,
+                message.message_id,
+            )
+        return decision
 
     async def _eligible(self, message: InboundMessage, history: Sequence[Turn]) -> bool:
         """Is this a conversation she would speak up in: the tier-two question.
@@ -567,6 +578,13 @@ class ReplyLeg:
         if decision is None:
             return False
 
+        if decision.confidence < MIN_CONFIDENCE:
+            logger.info(
+                "the gate is only %.2f sure about %s; not interrupting on a guess",
+                decision.confidence,
+                message.message_id,
+            )
+            return False
         if not decision.about_ai:
             logger.debug("%s is not about AI; nothing to chime in on", message.message_id)
             return False
@@ -661,7 +679,8 @@ def _turn_of(message: InboundMessage) -> Turn:
 def _shape_forbids(
     message: InboundMessage, history: Sequence[Turn], thread: Sequence[Turn]
 ) -> Silence | None:
-    """The two conversation-shape rules, from the reply policy.
+    """The two conversation-shape rules, from the reply policy. Chime-in only:
+    they ration volunteering, and a name-tag is answered whatever the shape.
 
     Both are about what she has already said, and both fail toward quiet.
     """
