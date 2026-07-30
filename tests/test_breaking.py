@@ -244,7 +244,7 @@ async def test_a_big_story_mid_afternoon_posts_off_schedule() -> None:
     assert posted is not None
     assert posted.item.canonical_url == TOP_OF_HN.canonical_url
     assert stack.evolution.texts == [
-        "miren, esto acaba de salir\nhttps://www.anthropic.com/news/claude-5"
+        "Miren, esto acaba de salir\nhttps://www.anthropic.com/news/claude-5"
     ]
     latest = await stack.sends.latest()
     assert latest is not None and latest.kind is SendKind.POST

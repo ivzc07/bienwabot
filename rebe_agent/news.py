@@ -66,7 +66,7 @@ from rebe_agent.preview import PreviewLookup
 from rebe_agent.sends import SendKind
 from rebe_agent.tiers import Tier, classify
 from rebe_agent.usage import CallType
-from rebe_agent.voice import DIGITS, LINKISH, MAX_EMOJI, emoji_count
+from rebe_agent.voice import DIGITS, LINKISH, MAX_EMOJI, capitalized, emoji_count
 
 logger = logging.getLogger("rebe_agent.news")
 
@@ -134,11 +134,12 @@ va, sin pena, y deja el mensaje vacío.
 Escribe un solo renglón, cortísimo, de menos de 80 caracteres, con dos cosas:
 - tu reacción, en tus palabras;
 - y dos o tres palabras que digan de qué va la nota.
+Empieza siempre con mayúscula, como cualquier mensaje bien escrito.
 
 Ejemplos del tono - no son plantillas, cambia las palabras cada vez:
-- ojo con lo de los libros raros y la IA 👀
-- ya salió el modelo que corre sin internet, está cañón
-- no manches lo de apple y la burbuja
+- Ojo con lo de los libros raros y la IA 👀
+- Ya salió el modelo que corre sin internet, está cañón
+- No manches lo de apple y la burbuja
 
 Nunca:
 - Resumir la nota ni traducir el titular. Si lo que escribiste se puede leer como
@@ -222,7 +223,7 @@ def render(post: NewsPost, item: NewsItem) -> str:
     model that ignores an instruction once in fifty is a bot tell once in fifty,
     and this is the last point at which that is still cheap to catch.
     """
-    framing = " ".join(post.text.split())
+    framing = capitalized(" ".join(post.text.split()))
     if not any(char.isalpha() for char in framing):
         # Not `if not framing`: a lone ":" is as empty as "", and one went out
         # live over the GCC AI-policy story - a colon, a newline and a link.

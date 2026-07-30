@@ -47,7 +47,7 @@ async def test_a_photo_goes_to_the_media_endpoint_with_its_caption(
     """The body is the whole contract: WhatsApp fetches the image itself, so
     `media` is a URL rather than bytes, and her words ride along as `caption`."""
     image = "https://openai.com/og/local-model.png"
-    caption = "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+    caption = "Miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
 
     message_id = await client.send_media(GROUP, image, caption)
 

@@ -52,7 +52,7 @@ all. How far apart posts really sit is the pacer's business, and is asserted
 there rather than re-argued here."""
 
 
-def answer(text: str = "miren, salio un modelo que corre sin nube") -> dict[str, Any]:
+def answer(text: str = "Miren, salio un modelo que corre sin nube") -> dict[str, Any]:
     return json_output_response(json.dumps({"for_the_group": True, "text": text}))
 
 
@@ -150,10 +150,10 @@ def make_leg(
 
 
 def test_the_post_is_her_words_and_the_canonical_link() -> None:
-    post = NewsPost(for_the_group=True, text="miren, salio un modelo que corre sin nube")
+    post = NewsPost(for_the_group=True, text="Miren, salio un modelo que corre sin nube")
 
     assert render(post, LAUNCH) == (
-        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+        "Miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
     )
 
 
@@ -180,7 +180,7 @@ def test_the_words_and_the_link_are_never_run_together() -> None:
     )
 
     words, link = rendered.split("\n")
-    assert words == "ojo con lo de los libros raros"
+    assert words == "Ojo con lo de los libros raros"
     assert link == LAUNCH.link
 
 
@@ -188,6 +188,14 @@ def test_a_model_that_writes_its_own_link_is_refused() -> None:
     """The one hallucination the group would actually click."""
     with pytest.raises(PostRejectedError, match="link"):
         render(NewsPost(for_the_group=True, text="esta en https://openai.com/x"), LAUNCH)
+
+
+def test_a_lowercase_answer_is_capitalized_rather_than_trusted() -> None:
+    """Enforced by rewrite, not by prompt: a message starting lowercase is the
+    one style slip every reader notices, so the first letter is fixed here."""
+    rendered = render(NewsPost(for_the_group=True, text="ya salio lo nuevo de openai"), LAUNCH)
+
+    assert rendered.startswith("Ya salio lo nuevo de openai\n")
 
     with pytest.raises(PostRejectedError, match="link"):
         render(NewsPost(for_the_group=True, text="checa openai.com para verlo"), LAUNCH)
@@ -241,7 +249,7 @@ def test_a_report_is_not_a_reaction() -> None:
     with pytest.raises(PostRejectedError, match="reaction"):
         render(NewsPost(for_the_group=True, text="a" * (MAX_POST_CHARS + 1)), LAUNCH)
 
-    reaction = "ojo con lo de los libros raros y la IA 👀"
+    reaction = "Ojo con lo de los libros raros y la IA 👀"
     assert len(reaction) <= MAX_POST_CHARS
     assert render(NewsPost(for_the_group=True, text=reaction), LAUNCH).startswith(reaction)
 
@@ -289,7 +297,7 @@ async def test_one_run_puts_one_curated_item_in_the_group(
     assert [post.item for post in sent] == [LAUNCH]
     assert evolution.shape == ["composing", "text", "paused"]
     assert evolution.texts == [
-        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+        "Miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
     ]
     assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
 
@@ -325,12 +333,12 @@ async def test_an_item_whose_page_has_an_image_goes_out_as_a_photo(
             "number": GROUP,
             "mediatype": "image",
             "media": image,
-            "caption": "miren, salio un modelo que corre sin nube\n"
+            "caption": "Miren, salio un modelo que corre sin nube\n"
             "https://openai.com/index/local-model",
         }
     ]
     # The store keeps recording her words only, exactly as with a text post.
-    assert [row.text for row in posted.items] == ["miren, salio un modelo que corre sin nube"]
+    assert [row.text for row in posted.items] == ["Miren, salio un modelo que corre sin nube"]
 
 
 async def test_an_item_whose_page_has_no_image_goes_out_as_text(
@@ -355,7 +363,7 @@ async def test_an_item_whose_page_has_no_image_goes_out_as_text(
     assert [post.item for post in sent] == [LAUNCH]
     assert evolution.shape == ["composing", "text", "paused"]
     assert evolution.texts == [
-        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+        "Miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
     ]
     assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
 
@@ -387,10 +395,10 @@ async def test_a_photo_whatsapp_cannot_fetch_falls_back_to_the_text_post(
     # not a second message, so the group does not watch her "type" twice.
     assert broken.shape == ["composing", "media", "text", "paused"]
     assert broken.texts == [
-        "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
+        "Miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
     ]
     assert [row.canonical_url for row in posted.items] == ["https://openai.com/index/local-model"]
-    assert [row.text for row in posted.items] == ["miren, salio un modelo que corre sin nube"]
+    assert [row.text for row in posted.items] == ["Miren, salio un modelo que corre sin nube"]
 
 
 async def test_every_call_carries_the_persona(
@@ -429,8 +437,8 @@ async def test_she_is_shown_what_she_already_wrote(
     await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP, limit=2)
 
     first, second = (request["messages"][-1]["content"] for request in fake.requests)
-    assert "miren, salio un modelo que corre sin nube" not in first, "nothing written yet"
-    assert "miren, salio un modelo que corre sin nube" in second
+    assert "Miren, salio un modelo que corre sin nube" not in first, "nothing written yet"
+    assert "Miren, salio un modelo que corre sin nube" in second
     assert "https://" not in second
 
 

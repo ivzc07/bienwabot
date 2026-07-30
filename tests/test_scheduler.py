@@ -820,7 +820,7 @@ async def test_a_due_slot_drives_the_news_leg_all_the_way_into_the_group(
     )
     fake = FakeDeepSeek(
         json_output_response(
-            '{"for_the_group": true, "text": "miren, salio un modelo que corre local"}'
+            '{"for_the_group": true, "text": "Miren, salio un modelo que corre local"}'
         )
     )
 
@@ -849,7 +849,7 @@ async def test_a_due_slot_drives_the_news_leg_all_the_way_into_the_group(
     await scheduler.step()
 
     assert evolution.texts == [
-        "miren, salio un modelo que corre local\nhttps://openai.com/index/local-model"
+        "Miren, salio un modelo que corre local\nhttps://openai.com/index/local-model"
     ]
     plan = await plans.plan_on(WEDNESDAY)
     assert plan is not None

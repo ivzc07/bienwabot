@@ -25,6 +25,22 @@ LINKISH = re.compile(r"https?://|www\.|\.com\b|\.mx\b|\.ai\b|\.org\b", re.IGNORE
 DIGITS = re.compile(r"\d+")
 """Every run of digits, for checking a claim against what she was actually given."""
 
+
+def capitalized(text: str) -> str:
+    """The same message, with its first letter upper-cased.
+
+    Enforced by rewrite rather than by prompt, because a model asked to
+    capitalise still forgets once in a while and a message starting lowercase
+    is the one style slip every reader notices. The first *letter*, not the
+    first character: an emoji or a quote mark before it is left alone, and a
+    message with no letters at all comes back untouched.
+    """
+    for index, character in enumerate(text):
+        if character.isalpha():
+            return text[:index] + character.upper() + text[index + 1 :]
+    return text
+
+
 _EMOJI = "So"
 """Unicode's "symbol, other" - the category most emoji live in."""
 

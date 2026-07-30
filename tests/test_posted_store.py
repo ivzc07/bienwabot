@@ -131,14 +131,14 @@ async def test_her_recent_wording_comes_back_newest_first(
     await store.remember(
         item(source_id="two", url="https://a.mx/2", title="Otra nota de hoy sobre IA"),
         NOON + timedelta(hours=1),
-        "ojo con lo de los libros raros",
+        "Ojo con lo de los libros raros",
     )
 
     assert await store.recent(5) == [
-        "ojo con lo de los libros raros",
+        "Ojo con lo de los libros raros",
         "miren, ya salio el modelo local",
     ]
-    assert await store.recent(1) == ["ojo con lo de los libros raros"]
+    assert await store.recent(1) == ["Ojo con lo de los libros raros"]
 
 
 async def test_a_row_from_before_the_column_existed_has_nothing_to_show(
