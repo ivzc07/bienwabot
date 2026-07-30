@@ -95,6 +95,15 @@ Counted per item, after its retry: a run that kept buying rejected answers would
 be the loop the budget fears.
 """
 
+DISMISSALS_PER_RUN = 3
+"""How many "not for the group" verdicts a run pays for before it stops.
+
+A dismissal is cheaper than a rejection - one call, no retry, and the item never
+comes back - but it is still a call, and a morning when HN is all compiler
+politics could otherwise spend the shortlist's whole depth learning that. Higher
+than the rejection bound because the third-best item on such a morning may still
+be a perfectly good post."""
+
 RECENT_POSTS = 5
 """How many of her own last posts she is shown before writing a new one.
 
@@ -112,6 +121,13 @@ más del grupo de WhatsApp, no una cuenta oficial ni un asistente.
 Te paso una noticia de IA. No la reportes: reacciona a ella, como cuando avientas
 un link al grupo nomás porque se te hizo interesante. La liga va debajo de lo que
 escribas y ahí está el detalle; tu mensaje solo tiene que dar ganas de abrirla.
+
+Primero decide si la nota va para el grupo. Son cuates normales, no
+programadores: les late lo que pueden probar, ver o platicar - un modelo nuevo,
+una app, algo de dinero, un escándalo de las empresas grandes. La política
+interna de proyectos de software, los papers académicos, los compiladores,
+kernels y la infraestructura de devs no les dicen nada: eso márcalo como que no
+va, sin pena, y deja el mensaje vacío.
 
 Escribe un solo renglón, cortísimo, de menos de 80 caracteres, con dos cosas:
 - tu reacción, en tus palabras;
@@ -147,18 +163,45 @@ class NewsPost(BaseModel):
     Both problems dissolve in one field. The model decides whether there is a
     hook at all, where it ends and how the words run together, because those are
     decisions about her voice; the code is left holding only the mechanics.
+
+    The verdict came later and is not words: the curator's gates are all
+    mechanical - points, freshness, title length - so "GCC steering committee
+    announces AI policy" sailed through them on HN points and went to a group
+    that has never compiled anything. The model is the only thing in the
+    pipeline that has actually read the story, so whether it is news *to this
+    group* is asked here, first, in the same call that was already being paid
+    for.
     """
 
+    for_the_group: bool = Field(
+        description=(
+            "¿Le dice algo esta nota a un grupo de cuates mexicanos que no "
+            "programan? true si la abrirían; false si es grilla interna del "
+            "software: política de proyectos, papers, compiladores, kernels, "
+            "infra de devs."
+        )
+    )
     text: str = Field(
         description=(
             "El mensaje completo, en la voz de Rebe: un renglón corto de reacción, "
-            "menos de 80 caracteres, sin liga."
+            "menos de 80 caracteres, sin liga. Vacío si la nota no va para el grupo."
         )
     )
 
 
 class PostRejectedError(ValueError):
     """The model answered, and the answer is not something Rebe would send."""
+
+
+class UnfitItemError(PostRejectedError):
+    """The model read the story, and it is not news this group would open.
+
+    A subclass, so every caller that already treats a rejected answer as "skip
+    this one and carry on" - the override leg above all - handles the verdict
+    without knowing it exists. The difference is in what it says about the item:
+    a rejection blames the wording and the article deserves another try; this
+    blames the article, so it is dismissed for the life of the process and never
+    retried."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +221,9 @@ def render(post: NewsPost, item: NewsItem) -> str:
     and this is the last point at which that is still cheap to catch.
     """
     framing = " ".join(post.text.split())
-    if not framing:
+    if not any(char.isalpha() for char in framing):
+        # Not `if not framing`: a lone ":" is as empty as "", and one went out
+        # live over the GCC AI-policy story - a colon, a newline and a link.
         raise PostRejectedError("the model wrote nothing")
     if len(framing) > MAX_POST_CHARS:
         raise PostRejectedError(
@@ -242,6 +287,11 @@ class NewsLeg:
         # does not care about images get exactly the behaviour from before the
         # preview ticket, without having to stub a lookup that answers `None`.
         self._preview = preview
+        # Items the model judged not for the group. In memory rather than in the
+        # posted store, because that store is a record of what the group saw and
+        # these are precisely what it never will; the cost of forgetting them on
+        # a restart is one call each, once.
+        self._dismissed: set[str] = set()
 
     @property
     def filters(self) -> Filters:
@@ -278,9 +328,13 @@ class NewsLeg:
 
         sent: list[Posted] = []
         rejected = 0
+        dismissed = 0
         for item in ranked:
             if len(sent) >= limit:
                 break
+            if item.canonical_url in self._dismissed:
+                logger.debug("already dismissed as not for the group: %s", item.canonical_url)
+                continue
             if await self._posted.knows(item):
                 logger.debug("already posted: %s", item.canonical_url)
                 continue
@@ -291,6 +345,15 @@ class NewsLeg:
                 # call ceiling - so the next candidate would fail the same way.
                 logger.info("the brain gave no answer for %s: %s", item.canonical_url, exc)
                 break
+            except UnfitItemError as exc:
+                # Before the plain rejection, because it is one: the article is
+                # the problem, `_write` has already dismissed it for good, and
+                # the next candidate may be exactly what the slot wants.
+                dismissed += 1
+                logger.info("not for the group: %s: %s", item.canonical_url, exc)
+                if dismissed >= DISMISSALS_PER_RUN:
+                    logger.info("%d items judged not for the group; ending the run", dismissed)
+                    break
             except PostRejectedError as exc:
                 # The item has already had its second chance inside `_write`, so
                 # what is left is an article she cannot write about within the
@@ -332,7 +395,11 @@ class NewsLeg:
         window, which is what drops a queued item the night outlived.
         """
         ranked = shortlist(pool, now, filters=self._filters, ranking=self._ranking)
-        return [item for item in ranked if not await self._posted.knows(item)]
+        return [
+            item
+            for item in ranked
+            if item.canonical_url not in self._dismissed and not await self._posted.knows(item)
+        ]
 
     async def post_one(self, chat: str, item: NewsItem) -> Posted:
         """One item, from a model call to a row in the posted store."""
@@ -375,6 +442,13 @@ class NewsLeg:
                 NewsPost,
                 instructions=INSTRUCTIONS,
             )
+            if not post.for_the_group:
+                # No retry: a rejection is about the wording and the wording can
+                # change, but the article is the article. Dismissed here rather
+                # than in `run` so the override leg's direct `post_one` calls
+                # stop seeing the item too.
+                self._dismissed.add(item.canonical_url)
+                raise UnfitItemError("she read it and it is not news this group would open")
             try:
                 return render(post, item)
             except PostRejectedError as exc:

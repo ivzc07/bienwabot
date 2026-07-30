@@ -818,7 +818,11 @@ async def test_a_due_slot_drives_the_news_leg_all_the_way_into_the_group(
         url="https://openai.com/index/local-model",
         published_at=at(time(7, 30)),
     )
-    fake = FakeDeepSeek(json_output_response('{"text": "miren, salio un modelo que corre local"}'))
+    fake = FakeDeepSeek(
+        json_output_response(
+            '{"for_the_group": true, "text": "miren, salio un modelo que corre local"}'
+        )
+    )
 
     class OnePool:
         async def fetch(self, now: datetime) -> Sequence[object]:

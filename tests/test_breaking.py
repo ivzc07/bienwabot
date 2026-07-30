@@ -127,9 +127,9 @@ class Pool:
 
 
 POSTS = (
-    json_output_response('{"text": "miren, esto acaba de salir"}'),
-    json_output_response('{"text": "chequen, y esto tambien"}'),
-    json_output_response('{"text": "orale, y una mas"}'),
+    json_output_response('{"for_the_group": true, "text": "miren, esto acaba de salir"}'),
+    json_output_response('{"for_the_group": true, "text": "chequen, y esto tambien"}'),
+    json_output_response('{"for_the_group": true, "text": "orale, y una mas"}'),
 )
 """Three different answers, because the pacer refuses identical wording twice."""
 
