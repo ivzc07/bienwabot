@@ -54,9 +54,9 @@ ROOMY = Envelope(post_gap=(timedelta(0), timedelta(0)))
 """The post-to-post gap lifted. It never bound a reply anyway; this keeps a test
 that sends twice from arguing with a rule the news leg owns."""
 
-VOICE = "jaja no creo, mas bien te lo hace mas facil"
+VOICE = "Jaja no creo, mas bien te lo hace mas facil"
 
-CHIMED_IN = "pues a mi el nuevo se me hizo mas rapido que el anterior"
+CHIMED_IN = "Pues a mi el nuevo se me hizo mas rapido que el anterior"
 
 ALLOWANCE = Allowance()
 """The shipped chime-in numbers, for the tests that step over them on purpose."""
@@ -181,21 +181,21 @@ def make_budget(
 
 
 def test_a_reply_is_one_short_line() -> None:
-    assert render(Reply(text="  jaja  no creo   "), Topic.ON_TOPIC) == "jaja no creo"
+    assert render(Reply(text="  jaja  no creo   "), Topic.ON_TOPIC) == "Jaja no creo"
 
 
 def test_a_laugh_is_hers_when_she_has_not_laughed_lately() -> None:
     assert (
-        render(Reply(text="jaja no creo"), Topic.ON_TOPIC, laughed_lately=False) == "jaja no creo"
+        render(Reply(text="Jaja no creo"), Topic.ON_TOPIC, laughed_lately=False) == "Jaja no creo"
     )
 
 
 @pytest.mark.parametrize(
     ("tic", "kept"),
     [
-        ("jaja no creo", "no creo"),
-        ("Jajaja, yo también lo pensé", "yo también lo pensé"),
-        ("no manches jeje", "no manches"),
+        ("Jaja no creo", "No creo"),
+        ("Jajaja, yo también lo pensé", "Yo también lo pensé"),
+        ("no manches jeje", "No manches"),
     ],
 )
 def test_a_second_laugh_is_stripped_not_sent(tic: str, kept: str) -> None:
@@ -212,8 +212,8 @@ def test_a_reply_that_is_only_another_laugh_is_dropped() -> None:
 def test_a_jarabe_is_not_a_laugh() -> None:
     """Ordinary words that start with the laugh's letters must survive the strip."""
     assert (
-        render(Reply(text="me pidieron un jarabe jaja"), Topic.ON_TOPIC, laughed_lately=True)
-        == "me pidieron un jarabe"
+        render(Reply(text="Me pidieron un jarabe jaja"), Topic.ON_TOPIC, laughed_lately=True)
+        == "Me pidieron un jarabe"
     )
 
 
@@ -242,7 +242,7 @@ def test_a_reply_that_invents_a_figure_is_refused() -> None:
 
 
 def test_a_small_number_is_still_ordinary_speech() -> None:
-    assert render(Reply(text="ese es gpt 5, no el 4"), Topic.ON_TOPIC) == "ese es gpt 5, no el 4"
+    assert render(Reply(text="Ese es gpt 5, no el 4"), Topic.ON_TOPIC) == "Ese es gpt 5, no el 4"
 
 
 def test_more_than_one_emoji_is_refused() -> None:
@@ -276,7 +276,7 @@ def test_a_reply_that_confirms_she_is_a_bot_never_leaves_the_process(confession:
 
 @pytest.mark.parametrize(
     "innocent",
-    ["si soy sincera ni idea", "sí soy fan de esa herramienta"],
+    ["Si soy sincera ni idea", "Sí soy fan de esa herramienta"],
 )
 def test_an_ordinary_si_soy_is_not_a_confession(innocent: str) -> None:
     """The guard's answer is silence, so a pattern that fires on a normal turn of
@@ -294,7 +294,7 @@ def test_a_deflection_that_steers_back_to_ai_is_refused(topic: Topic) -> None:
 
 
 def test_talking_about_ai_is_the_whole_point_everywhere_else() -> None:
-    answer = "pues la IA de imagenes ya quedo bien chida"
+    answer = "Pues la IA de imagenes ya quedo bien chida"
 
     assert render(Reply(text=answer), Topic.ON_TOPIC) == answer
 
@@ -539,12 +539,12 @@ async def test_an_off_topic_address_is_deflected_rather_than_answered(
     """ "Rebe where do you live" gets a human brush-off, not a lookup - so the
     instructions the model is given for an off-topic turn are not the on-topic
     ones."""
-    fake = FakeDeepSeek(verdict(Topic.OFF_TOPIC), wrote("ando ocupada, luego les cuento"))
+    fake = FakeDeepSeek(verdict(Topic.OFF_TOPIC), wrote("Ando ocupada, luego les cuento"))
     leg = make_leg(settings, fake, evolution, memory, clock)
 
     await leg.handle(message("by_name", text="rebe donde vives?"))
 
-    assert evolution.texts == ["ando ocupada, luego les cuento"]
+    assert evolution.texts == ["Ando ocupada, luego les cuento"]
     written = _instructions(fake.requests[-1])
     assert "buscador" in written, "the deflection instruction is the one that went out"
 
@@ -559,7 +559,7 @@ async def test_a_no_go_topic_gets_one_deflection_and_then_silence(
     thread gets nothing at all."""
     fake = FakeDeepSeek(
         verdict(Topic.NO_GO),
-        wrote("uy de eso ni idea, mejor pregunta a alguien que sepa"),
+        wrote("Uy de eso ni idea, mejor pregunta a alguien que sepa"),
         verdict(Topic.NO_GO),
         wrote("y por cierto, hablando de IA..."),
     )
@@ -577,7 +577,7 @@ async def test_a_no_go_topic_gets_one_deflection_and_then_silence(
     )
 
     assert second is None
-    assert evolution.texts == ["uy de eso ni idea, mejor pregunta a alguien que sepa"]
+    assert evolution.texts == ["Uy de eso ni idea, mejor pregunta a alguien que sepa"]
 
 
 @pytest.mark.parametrize(
@@ -601,7 +601,7 @@ async def test_every_no_go_category_gets_the_same_short_deflection(
 ) -> None:
     """Advice with real-world stakes, politics, religion, members' data, NSFW.
     The gate names the category; what this leg owes each of them is one line."""
-    deflection = "uy de eso ni idea, mejor pregunta a alguien que sepa"
+    deflection = "Uy de eso ni idea, mejor pregunta a alguien que sepa"
     fake = FakeDeepSeek(verdict(Topic.NO_GO), wrote(deflection))
     leg = make_leg(settings, fake, evolution, memory, clock)
 
@@ -618,12 +618,12 @@ async def test_a_bot_question_is_deflected_and_never_confirmed(
     memory: InMemoryGroupMemory,
     clock: ManualClock,
 ) -> None:
-    fake = FakeDeepSeek(verdict(Topic.BOT_QUESTION), wrote("jajaja por? ya me dijeron eso antes"))
+    fake = FakeDeepSeek(verdict(Topic.BOT_QUESTION), wrote("Jajaja por? ya me dijeron eso antes"))
     leg = make_leg(settings, fake, evolution, memory, clock)
 
     await leg.handle(message("bot_question"))
 
-    assert evolution.texts == ["jajaja por? ya me dijeron eso antes"]
+    assert evolution.texts == ["Jajaja por? ya me dijeron eso antes"]
     assert "bot" in _instructions(fake.requests[-1]), "the rule is here, where it was asked"
 
 

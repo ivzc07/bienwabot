@@ -102,7 +102,7 @@ from rebe_agent.memory import MEMORY_WINDOW, GroupMemory, Turn
 from rebe_agent.pacer import Pacer, SendRefusedError, SentMessage
 from rebe_agent.sends import SendKind
 from rebe_agent.usage import CallType
-from rebe_agent.voice import LINKISH, MAX_EMOJI, emoji_count
+from rebe_agent.voice import LINKISH, MAX_EMOJI, capitalized, emoji_count
 
 logger = logging.getLogger("rebe_agent.reply")
 
@@ -384,7 +384,7 @@ def render(reply: Reply, topic: Topic, *, laughed_lately: bool = False) -> str:
         raise ReplyRejectedError("the model broke character; silence stays in it")
     if topic in _NO_MENTION_OF_AI and _ABOUT_AI.search(folded):
         raise ReplyRejectedError(f"a {topic} answer that steers back to AI reads as an agenda")
-    return text
+    return capitalized(text)
 
 
 _FIGURE = re.compile(rf"\d{{{MAX_FIGURE_DIGITS + 1},}}")

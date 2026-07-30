@@ -46,7 +46,7 @@ from rebe_agent.items import NewsItem
 from rebe_agent.pacer import Pacer, SendRefusedError, SentMessage
 from rebe_agent.sends import SendKind
 from rebe_agent.usage import CallType
-from rebe_agent.voice import DIGITS, LINKISH, emoji_count
+from rebe_agent.voice import DIGITS, LINKISH, capitalized, emoji_count
 
 logger = logging.getLogger("rebe_agent.announce")
 
@@ -99,7 +99,7 @@ def render(announcement: Announcement, item: NewsItem) -> str:
     The same defence the group post gets: every rule here is one the prompt also
     asks for, checked at the last point where catching it is still cheap.
     """
-    wording = " ".join(announcement.text.split())
+    wording = capitalized(" ".join(announcement.text.split()))
     if not any(char.isalpha() for char in wording):
         raise AnnouncementRejectedError("the model wrote nothing")
     if len(wording) > MAX_ANNOUNCEMENT_CHARS:

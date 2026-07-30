@@ -80,7 +80,7 @@ async def test_connecting_twice_does_not_fight_over_the_schema() -> None:
 async def test_a_turn_comes_back_with_every_field_it_went_in_with(
     memory: PostgresGroupMemory,
 ) -> None:
-    turn = answered("jaja no creo", message_id="REBE-1")
+    turn = answered("Jaja no creo", message_id="REBE-1")
 
     assert await memory.remember(turn) is True
 
