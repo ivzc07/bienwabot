@@ -72,6 +72,15 @@ class Settings(BaseModel):
     evolution_api_key: SecretStr = Field(alias="EVOLUTION_API_KEY")
     evolution_instance: str = Field(default=DEFAULT_INSTANCE, alias="EVOLUTION_INSTANCE")
     rebe_group_jid: str = Field(alias="REBE_GROUP_JID")
+    rebe_announce_jid: str | None = Field(
+        default=None,
+        alias="REBE_ANNOUNCE_JID",
+        description=(
+            "The bien.mx Community's Announcements channel. When set, every "
+            "high-tier post gets a professional-register twin there; unset "
+            "means the announcement leg is off."
+        ),
+    )
     webhook_secret: SecretStr = Field(alias="WEBHOOK_SECRET")
     rebe_database_url: SecretStr = Field(alias="REBE_DATABASE_URL")
     telegram_bot_token: SecretStr = Field(alias="TELEGRAM_BOT_TOKEN")

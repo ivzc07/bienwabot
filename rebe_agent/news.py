@@ -54,6 +54,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from rebe_agent.announce import Announcer
 from rebe_agent.brain import Brain, BrainError
 from rebe_agent.clock import Clock
 from rebe_agent.curate import Filters, Ranking, shortlist
@@ -63,6 +64,7 @@ from rebe_agent.pacer import Pacer, SendRefusedError, SentMessage
 from rebe_agent.posted import PostedStore
 from rebe_agent.preview import PreviewLookup
 from rebe_agent.sends import SendKind
+from rebe_agent.tiers import Tier, classify
 from rebe_agent.usage import CallType
 from rebe_agent.voice import DIGITS, LINKISH, MAX_EMOJI, emoji_count
 
@@ -275,6 +277,7 @@ class NewsLeg:
         filters: Filters | None = None,
         ranking: Ranking | None = None,
         preview: PreviewLookup | None = None,
+        announcer: Announcer | None = None,
     ) -> None:
         self._brain = brain
         self._pacer = pacer
@@ -283,6 +286,10 @@ class NewsLeg:
         self._clock = clock
         self._filters = filters or Filters()
         self._ranking = ranking or Ranking()
+        # `None` means no Announcements channel is configured and high-tier
+        # items post to the group and nothing more - the behaviour from before
+        # the announcements spec, which is also the dry-run and test default.
+        self._announcer = announcer
         # `None` means no previews at all - the dry-run wiring and any test that
         # does not care about images get exactly the behaviour from before the
         # preview ticket, without having to stub a lookup that answers `None`.
@@ -422,6 +429,14 @@ class NewsLeg:
         # After the send, never before: the store says what the group saw.
         await self._posted.remember(item, self._clock.now(), words)
         logger.info("posted %s from %s", item.canonical_url, item.source)
+        # The announcement twin, after the post is already remembered: every
+        # high-tier item that posts gets one, whichever path posted it - a
+        # drawn slot, the override leg, the overnight drain, `--post-news` -
+        # because this is the one place they all post through. `announce`
+        # never raises; a twin that could not go out costs the channel one
+        # message, never the group its post.
+        if self._announcer is not None and classify(item, filters=self._filters) is Tier.HIGH:
+            await self._announcer.announce(item)
         return Posted(item=item, text=text, message=message)
 
     async def _write(self, item: NewsItem, recent: Sequence[str]) -> str:

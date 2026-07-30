@@ -404,6 +404,13 @@ class Pacer:
 
         if kind is SendKind.POST:
             await self._check_post_rules(now)
+        elif kind is SendKind.ANNOUNCEMENT:
+            # An announcement is the same story in another room, moments after
+            # its group twin - so no post-to-post gap and no ramp clamp, which
+            # both shape how often the *group* hears from her. The overnight
+            # hold still applies: nothing scheduled leaves at 03:00, whatever
+            # room it is bound for.
+            self._check_the_hold(now)
 
         if previous is not None and self._envelope.night_hush.contains(now.time()):
             self._check_the_hush(previous, now)
@@ -440,14 +447,7 @@ class Pacer:
         says replies carry on as normal.
         """
         await self._check_the_clamp(now)
-
-        hold = self._envelope.overnight_hold
-        if hold.contains(now.time()):
-            raise SendRefusedError(
-                RefusalReason.OVERNIGHT_HOLD,
-                f"scheduled posts are held {hold} local time; it is {now:%H:%M}",
-                retry_after=_until(now, hold.closes),
-            )
+        self._check_the_hold(now)
 
         last_post = await self._log.latest(kind=SendKind.POST)
         if last_post is None:
@@ -461,6 +461,16 @@ class Pacer:
                 f"the last post was {_minutes(elapsed)} ago and this one wants "
                 f"{_minutes(required)} of space",
                 retry_after=required - elapsed,
+            )
+
+    def _check_the_hold(self, now: datetime) -> None:
+        """Nothing scheduled leaves between 23:00 and 08:00, whatever the room."""
+        hold = self._envelope.overnight_hold
+        if hold.contains(now.time()):
+            raise SendRefusedError(
+                RefusalReason.OVERNIGHT_HOLD,
+                f"scheduled posts are held {hold} local time; it is {now:%H:%M}",
+                retry_after=_until(now, hold.closes),
             )
 
     async def _check_the_clamp(self, now: datetime) -> None:
