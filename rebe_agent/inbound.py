@@ -160,8 +160,7 @@ def parse(body: Mapping[str, Any]) -> InboundMessage | None:
         return None
 
     content = _unwrap(data.get("message"))
-    context = _mapping(content.get("extendedTextMessage")).get("contextInfo")
-    context = context if isinstance(context, dict) else {}
+    context = _context(data, content)
 
     return InboundMessage(
         chat=chat,
@@ -180,6 +179,32 @@ def parse(body: Mapping[str, Any]) -> InboundMessage | None:
         quoted_author=_text_of(context.get("participant")),
         rebe=_text_of(body.get("sender")),
     )
+
+
+def _context(data: Mapping[str, Any], content: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Where the mention and the quote live, whichever of the two places that is.
+
+    Baileys hangs `contextInfo` off the message node when the message has one - an
+    `extendedTextMessage`, which is what a text with a link or a reply becomes. A
+    bare @-mention typed on its own is a plain `conversation`, and Evolution
+    reports its mention at the top of `data` instead. Read only the first place and
+    `mentioned` comes back empty on exactly the payload the live group sends:
+
+        "messageType": "conversation",
+        "message": {"conversation": "@30306094551155"},
+        "contextInfo": {"mentionedJid": ["30306094551155@lid"]}
+
+    Those two @-mentions of her on 2026-07-29 were still answered, but only
+    because the lid's digits happen to appear in the text and `_addressed` checks
+    that too. A client that renders the tag as a name rather than as a number
+    leaves nothing for the fallback to find, and the mention is the field that is
+    actually supposed to carry this.
+
+    The message node wins where both are present: it is the one Baileys itself
+    filled in, and the top-level copy is Evolution's flattening of it.
+    """
+    inner = _mapping(_mapping(content.get("extendedTextMessage")).get("contextInfo"))
+    return inner or _mapping(data.get("contextInfo"))
 
 
 def parse_connection(body: Mapping[str, Any]) -> ConnectionUpdate | None:

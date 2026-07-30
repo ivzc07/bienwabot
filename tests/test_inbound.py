@@ -20,6 +20,9 @@ from tests.webhooks import ANA, AT_EPOCH, BETO, REBE, edited, payload
 HER_POST = "STUB-MESSAGE-ID"
 """The id of a message Rebe sent, as the send path would have remembered it."""
 
+REBE_LID = "30306094551155@lid"
+"""The same person as `REBE`, under the lid a lid-addressed group tags her by."""
+
 
 def tier_of(name: str, *, hers: frozenset[str] = frozenset()) -> Tier:
     message = parse(payload(name))
@@ -154,6 +157,46 @@ def test_a_mention_of_somebody_else_is_not_a_mention_of_her() -> None:
     assert message is not None
 
     assert tier(message, hers=frozenset()) is Tier.CHATTER
+
+
+# --- a mention that is not on an extendedTextMessage --------------------------
+#
+# `webhook_lid_mention` is the body the live group actually sends when somebody
+# taps her name and sends nothing else: a plain `conversation`, with the mention
+# at the top of `data` rather than inside `extendedTextMessage`. The lid rule
+# answered those two 2026-07-29 messages off the digits in the text; these are
+# about the field that is supposed to carry the tag arriving at all.
+
+
+def test_a_mention_on_a_conversation_message_is_read() -> None:
+    message = parse(payload("lid_mention"))
+
+    assert message is not None
+    assert message.mentioned == frozenset({REBE_LID})
+
+
+def test_a_lid_mention_with_nothing_to_match_in_the_text_is_still_addressed() -> None:
+    """The case neither fallback can reach: a client that renders the tag as her
+    *profile* name puts neither her number nor her name in the message, so the
+    parsed mention is the only evidence left that she was the one tagged."""
+    message = parse(edited("lid_mention", text="@Bien.mx ya viste esto"))
+    assert message is not None
+
+    assert "30306094551155" not in message.text, "nothing for the @number fallback"
+    assert "rebe" not in message.text.lower(), "and nothing for the name regex"
+    assert tier(message, hers=frozenset(), aliases=frozenset({REBE_LID})) is Tier.ADDRESSED
+
+
+def test_a_mention_inside_the_message_node_still_wins() -> None:
+    """Both places at once is Evolution flattening what Baileys already filled in.
+    The message node is the original, so it is the one that is read."""
+    body = edited("mention", mentioned=[REBE])
+    body["data"]["contextInfo"] = {"mentionedJid": [BETO]}
+
+    message = parse(body)
+
+    assert message is not None
+    assert message.mentioned == frozenset({REBE})
 
 
 def test_the_recorded_timestamp_is_the_one_the_shape_rules_read() -> None:
