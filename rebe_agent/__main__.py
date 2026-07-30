@@ -27,6 +27,7 @@ from psycopg_pool import PoolTimeout
 from rebe_agent import __version__
 from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.breaking import Breaking
+from rebe_agent.cadence import Cadence, dense_cadence
 from rebe_agent.chimeins import ChimeInBudget, PostgresChimeInLog
 from rebe_agent.clock import Clock, SystemClock
 from rebe_agent.config import ConfigurationError, Settings, load_settings
@@ -38,7 +39,7 @@ from rebe_agent.memory import PostgresGroupMemory
 from rebe_agent.news import NewsLeg
 from rebe_agent.ops import OpsChannel, build_ops
 from rebe_agent.overnight import PostgresOvernightQueue
-from rebe_agent.pacer import Pacer, SendRefusedError
+from rebe_agent.pacer import Envelope, Pacer, SendRefusedError, dense_envelope
 from rebe_agent.pause import Pause, PostgresPauseSwitch
 from rebe_agent.plans import PostgresPlanStore
 from rebe_agent.posted import PostgresPostedStore
@@ -243,7 +244,16 @@ async def say_once(settings: Settings, clock: Clock, chat: str, text: str, kind:
     ):
         log = PostgresSendLog(pool)
         await log.ensure_schema()
-        pacer = Pacer(client, log, clock, pause=ops.pause, watch=ops.watchtower, ramp=ops.ramp)
+        _, envelope = posting_posture(settings)
+        pacer = Pacer(
+            client,
+            log,
+            clock,
+            envelope=envelope,
+            pause=ops.pause,
+            watch=ops.watchtower,
+            ramp=ops.ramp,
+        )
         try:
             # The pacer logs the send it made; there is one event here, not two.
             await pacer.send(kind, chat, text)
@@ -284,6 +294,23 @@ class NewsStack:
         await self.overnight.ensure_schema()
 
 
+def posting_posture(settings: Settings) -> tuple[Cadence, Envelope]:
+    """The day's shape and the envelope that has to let that shape through.
+
+    Defaults are the shipped human cadence. `CADENCE_SLOT_MINUTES` swaps in the
+    dense experiment and shrinks the post-to-post gap to match - otherwise the
+    scheduler would draw a slot every half hour and the pacer would refuse it.
+    """
+    minutes = settings.cadence_slot_minutes
+    if minutes is None:
+        return Cadence(), Envelope()
+    logger.warning(
+        "dense cadence on: every %dm from 08:00-23:00 - WhatsApp may treat this as automation",
+        minutes,
+    )
+    return dense_cadence(minutes), dense_envelope(minutes)
+
+
 def build_news_stack(
     settings: Settings,
     clock: Clock,
@@ -308,7 +335,16 @@ def build_news_stack(
     posted = PostgresPostedStore(pool)
     plans = PostgresPlanStore(pool, settings.zone)
     overnight = PostgresOvernightQueue(pool)
-    pacer = Pacer(evolution, sends, clock, pause=ops.pause, watch=ops.watchtower, ramp=ops.ramp)
+    _, envelope = posting_posture(settings)
+    pacer = Pacer(
+        evolution,
+        sends,
+        clock,
+        envelope=envelope,
+        pause=ops.pause,
+        watch=ops.watchtower,
+        ramp=ops.ramp,
+    )
 
     # One `Filters` for both halves: the fetch asks each source for exactly
     # what the curator would have kept, rather than for its own idea of it.
@@ -518,6 +554,7 @@ async def serve(settings: Settings, clock: Clock) -> int:
         # The override leg posts through the same news leg and the same pacer the
         # drawn slots do, so "important news is never held back by the quota"
         # never becomes "important news is never held back".
+        cadence, _ = posting_posture(settings)
         breaking = Breaking(
             stack.leg,
             settings.rebe_group_jid,
@@ -525,6 +562,7 @@ async def serve(settings: Settings, clock: Clock) -> int:
             stack.sends,
             stack.overnight,
             clock,
+            cadence=cadence,
         )
         scheduler = Scheduler(
             stack.leg,
@@ -532,6 +570,7 @@ async def serve(settings: Settings, clock: Clock) -> int:
             stack.plans,
             stack.sends,
             clock,
+            cadence=cadence,
             breaking=breaking,
         )
         server = EmbeddedServer(

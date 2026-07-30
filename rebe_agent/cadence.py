@@ -114,6 +114,80 @@ WEEKEND_WINDOWS: tuple[PostWindow, ...] = (
 independent reasons point the same way: people wake later on a Saturday, and AI
 news genuinely dries up - companies do not announce on weekends and HN slows."""
 
+MIN_SLOT_MINUTES = 15
+MAX_SLOT_MINUTES = 180
+"""Bounds on the experimental dense cadence. Below 15 the day is a firehose;
+above 180 it is just the shipped shape with worse names."""
+
+
+DENSE_FIRE_MINUTES = 5
+"""How wide each dense firing window is. Short on purpose: a full-width slot
+(every half hour of open time) lets Gaussian draws land one minute apart across
+a boundary and the global gap then drops half the day. A five-minute window
+every N minutes keeps the rhythm without the drop."""
+
+
+def slot_windows(minutes: int) -> tuple[PostWindow, ...]:
+    """One short firing window every `minutes`, from wake until quiet.
+
+    Used only by the experimental dense cadence (`CADENCE_SLOT_MINUTES`). The
+    shipped day still uses the named loose windows above; this is the test knob
+    that turns "about four a day" into "try every half hour".
+    """
+    if minutes < MIN_SLOT_MINUTES or minutes > MAX_SLOT_MINUTES:
+        raise ValueError(
+            f"slot minutes must be between {MIN_SLOT_MINUTES} and {MAX_SLOT_MINUTES}, got {minutes}"
+        )
+    fire = min(DENSE_FIRE_MINUTES, minutes - 1)
+    if fire < 1:
+        raise ValueError(f"slot of {minutes}m leaves no room for a firing window")
+
+    step = timedelta(minutes=minutes)
+    width = timedelta(minutes=fire)
+    opens_at = datetime.combine(date.today(), WAKING_OPENS)
+    closes_at = datetime.combine(date.today(), WAKING_CLOSES)
+    windows: list[PostWindow] = []
+    cursor = opens_at
+    index = 0
+    while cursor + width <= closes_at:
+        end = cursor + width
+        windows.append(
+            PostWindow(
+                name=f"s{index:02d}",
+                opens=cursor.time().replace(second=0, microsecond=0),
+                closes=end.time().replace(second=0, microsecond=0),
+            )
+        )
+        cursor += step
+        index += 1
+    if not windows:
+        raise ValueError(f"slot of {minutes}m does not fit between wake and quiet")
+    return tuple(windows)
+
+
+def dense_cadence(slot_minutes: int) -> Cadence:
+    """A day of fixed-interval slots for volume testing.
+
+    Same windows on weekdays and weekends on purpose: the experiment is "how
+    does the group feel at this rate", not the weekend shape. The gap sits a
+    little under the interval so a slightly early/late draw pair still clears;
+    the daily stop is the slot count so a dense day is not cut by the old
+    eight-post soft stop.
+    """
+    windows = slot_windows(slot_minutes)
+    # Firing windows are `DENSE_FIRE_MINUTES` wide and `slot_minutes` apart, so
+    # two back-to-back draws can sit only (slot - fire) minutes apart. The gap
+    # must sit under that floor or the roll quietly drops half the day.
+    floor = max(slot_minutes - DENSE_FIRE_MINUTES, 1)
+    low = max(floor - 5, 1)
+    return Cadence(
+        weekday=windows,
+        weekend=windows,
+        gap=(timedelta(minutes=low), timedelta(minutes=floor)),
+        daily_stop=len(windows),
+    )
+
+
 SATURDAY = 5
 """`date.weekday()` counts from Monday, so Saturday and Sunday are 5 and 6."""
 
