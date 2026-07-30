@@ -23,6 +23,7 @@ from rebe_agent.config import Settings, load_settings
 from rebe_agent.evolution import EvolutionClient, EvolutionError
 from rebe_agent.items import NewsItem
 from rebe_agent.news import (
+    DISMISSALS_PER_RUN,
     INSTRUCTIONS,
     MAX_POST_CHARS,
     REJECTIONS_PER_RUN,
@@ -52,7 +53,12 @@ there rather than re-argued here."""
 
 
 def answer(text: str = "miren, salio un modelo que corre sin nube") -> dict[str, Any]:
-    return json_output_response(json.dumps({"text": text}))
+    return json_output_response(json.dumps({"for_the_group": True, "text": text}))
+
+
+def unfit() -> dict[str, Any]:
+    """The model's verdict that the story is not for this group."""
+    return json_output_response(json.dumps({"for_the_group": False, "text": ""}))
 
 
 LAUNCH = item(
@@ -144,7 +150,7 @@ def make_leg(
 
 
 def test_the_post_is_her_words_and_the_canonical_link() -> None:
-    post = NewsPost(text="miren, salio un modelo que corre sin nube")
+    post = NewsPost(for_the_group=True, text="miren, salio un modelo que corre sin nube")
 
     assert render(post, LAUNCH) == (
         "miren, salio un modelo que corre sin nube\nhttps://openai.com/index/local-model"
@@ -158,7 +164,7 @@ def test_the_posted_link_is_the_publishers_own_minus_the_tracking() -> None:
     link" cuts both ways."""
     tracked = item(url="https://www.openai.com/index/local-model/?utm_source=rss")
 
-    rendered = render(NewsPost(text="ya salio"), tracked)
+    rendered = render(NewsPost(for_the_group=True, text="ya salio"), tracked)
 
     assert rendered.endswith("\nhttps://www.openai.com/index/local-model/")
     assert tracked.canonical_url == "https://openai.com/index/local-model"
@@ -169,7 +175,9 @@ def test_the_words_and_the_link_are_never_run_together() -> None:
     joining a framing word to a capitalised sentence with a bare space. There is
     one field now, so the only join left is the one before the link, and it is a
     newline."""
-    rendered = render(NewsPost(text="ojo   con   lo de los libros  raros"), LAUNCH)
+    rendered = render(
+        NewsPost(for_the_group=True, text="ojo   con   lo de los libros  raros"), LAUNCH
+    )
 
     words, link = rendered.split("\n")
     assert words == "ojo con lo de los libros raros"
@@ -179,48 +187,63 @@ def test_the_words_and_the_link_are_never_run_together() -> None:
 def test_a_model_that_writes_its_own_link_is_refused() -> None:
     """The one hallucination the group would actually click."""
     with pytest.raises(PostRejectedError, match="link"):
-        render(NewsPost(text="esta en https://openai.com/x"), LAUNCH)
+        render(NewsPost(for_the_group=True, text="esta en https://openai.com/x"), LAUNCH)
 
     with pytest.raises(PostRejectedError, match="link"):
-        render(NewsPost(text="checa openai.com para verlo"), LAUNCH)
+        render(NewsPost(for_the_group=True, text="checa openai.com para verlo"), LAUNCH)
 
 
 def test_a_number_the_source_never_gave_is_refused() -> None:
     """The mechanical half of the anti-hallucination bound: the post may restate
     the source item and nothing else."""
     with pytest.raises(PostRejectedError, match="700"):
-        render(NewsPost(text="son 700 millones de parametros"), LAUNCH)
+        render(NewsPost(for_the_group=True, text="son 700 millones de parametros"), LAUNCH)
 
 
 def test_a_number_the_source_did_give_is_fine() -> None:
     grounded = item(title="Llama 4 sale hoy", summary="Corre en 2 GPUs.")
 
-    assert "4" in render(NewsPost(text="salio llama 4, corre en 2 gpus"), grounded)
+    assert "4" in render(
+        NewsPost(for_the_group=True, text="salio llama 4, corre en 2 gpus"), grounded
+    )
 
 
 def test_more_than_one_emoji_is_refused() -> None:
     with pytest.raises(PostRejectedError, match="emoji"):
-        render(NewsPost(text="miren 👀🔥 salio algo"), LAUNCH)
+        render(NewsPost(for_the_group=True, text="miren 👀🔥 salio algo"), LAUNCH)
 
 
 def test_one_emoji_is_the_voice_working() -> None:
-    assert "👀" in render(NewsPost(text="miren esto 👀 salio algo bueno"), LAUNCH)
+    assert "👀" in render(
+        NewsPost(for_the_group=True, text="miren esto 👀 salio algo bueno"), LAUNCH
+    )
 
 
 def test_an_empty_answer_is_not_a_post() -> None:
     with pytest.raises(PostRejectedError, match="nothing"):
-        render(NewsPost(text="   "), LAUNCH)
+        render(NewsPost(for_the_group=True, text="   "), LAUNCH)
+
+
+def test_an_answer_with_no_words_is_not_a_post() -> None:
+    """The live post of 2026-07-30 was a colon, a newline and the link: the model
+    handed back ":" and the empty check only knew about "". Text with no letters
+    is nothing, however much punctuation carries it."""
+    with pytest.raises(PostRejectedError, match="nothing"):
+        render(NewsPost(for_the_group=True, text=":"), LAUNCH)
+
+    with pytest.raises(PostRejectedError, match="nothing"):
+        render(NewsPost(for_the_group=True, text="... 👀"), LAUNCH)
 
 
 def test_a_report_is_not_a_reaction() -> None:
     """The three posts that started this change were 77, 103 and 141 characters -
     headlines, translated. The cap is the width of the thing she is asked for."""
     with pytest.raises(PostRejectedError, match="reaction"):
-        render(NewsPost(text="a" * (MAX_POST_CHARS + 1)), LAUNCH)
+        render(NewsPost(for_the_group=True, text="a" * (MAX_POST_CHARS + 1)), LAUNCH)
 
     reaction = "ojo con lo de los libros raros y la IA 👀"
     assert len(reaction) <= MAX_POST_CHARS
-    assert render(NewsPost(text=reaction), LAUNCH).startswith(reaction)
+    assert render(NewsPost(for_the_group=True, text=reaction), LAUNCH).startswith(reaction)
 
 
 @pytest.mark.parametrize(
@@ -245,7 +268,7 @@ def test_emoji_are_counted_the_way_a_reader_counts_them(text: str, expected: int
 
 
 def test_a_single_flag_is_not_two_emoji() -> None:
-    assert "🇲🇽" in render(NewsPost(text="salio algo en mexico 🇲🇽"), LAUNCH)
+    assert "🇲🇽" in render(NewsPost(for_the_group=True, text="salio algo en mexico 🇲🇽"), LAUNCH)
 
 
 # --- one run -----------------------------------------------------------------
@@ -653,6 +676,78 @@ async def test_a_run_stops_paying_for_answers_it_keeps_rejecting(
 
     assert sent == []
     assert len(fake.requests) == REJECTIONS_PER_RUN * (RETRIES_PER_ITEM + 1)
+
+
+async def test_a_story_not_for_the_group_gives_way_to_the_next_candidate(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """The live post this gate exists for was "GCC steering committee announces
+    AI policy": fresh, well-upvoted, twelve characters of title - every
+    mechanical gate passed, because none of them had read the story. The model
+    has, so its verdict skips the item and the slot goes to the next one."""
+    pool = StubCandidates(
+        item(source_id="a", title="GCC anuncia su politica de IA", url="https://a.mx/gcc"),
+        item(source_id="b", title="Sale un modelo nuevo que corre local", url="https://a.mx/2"),
+    )
+    fake = FakeDeepSeek(unfit(), answer())
+
+    sent = await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP)
+
+    assert [post.item.source_id for post in sent] == ["b"]
+    assert [row.source_id for row in posted.items] == ["b"]
+
+
+async def test_a_dismissed_story_never_costs_a_second_call(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """A rejection blames the wording and earns a retry; a dismissal blames the
+    article, and the article does not change between runs."""
+    pool = StubCandidates(
+        item(source_id="a", title="GCC anuncia su politica de IA", url="https://a.mx/gcc"),
+        item(source_id="b", title="Sale un modelo nuevo que corre local", url="https://a.mx/2"),
+    )
+    fake = FakeDeepSeek(unfit(), answer())
+    leg = make_leg(settings, fake, evolution, posted, clock, pool)
+
+    assert len(await leg.run(GROUP)) == 1
+    assert await leg.run(GROUP) == []
+
+    assert len(fake.requests) == 2, "the dismissed item was never asked about again"
+    assert await leg.unposted(clock.now()) == [], (
+        "the override leg's shortlist drops a dismissed item too"
+    )
+
+
+async def test_a_run_stops_paying_for_stories_that_are_not_for_the_group(
+    settings: Settings,
+    evolution: FakeEvolution,
+    posted: InMemoryPostedStore,
+    clock: ManualClock,
+) -> None:
+    """A morning when HN is all compiler politics must not spend the whole
+    shortlist finding that out."""
+    pool = StubCandidates(
+        *(
+            item(
+                source_id=str(number),
+                title=f"Nota numero {number} de hoy",
+                url=f"https://a.mx/{number}",
+            )
+            for number in range(DISMISSALS_PER_RUN + 2)
+        )
+    )
+    fake = FakeDeepSeek(unfit())
+
+    sent = await make_leg(settings, fake, evolution, posted, clock, pool).run(GROUP)
+
+    assert sent == []
+    assert len(fake.requests) == DISMISSALS_PER_RUN
 
 
 async def test_a_failed_send_does_not_permanently_burn_the_item(
