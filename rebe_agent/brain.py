@@ -216,6 +216,10 @@ CALL_SHAPES: dict[CallType, CallShape] = {
     CallType.REPLY_GENERATION: CallShape(max_tokens=2500, temperature=0.9),
     # D: B against an article instead of a chat message. Estimated at ~50 tokens.
     CallType.RELEVANCE_GATE: CallShape(max_tokens=600, temperature=0.2),
+    # E: the announcement twin - one or two plain sentences under 200 characters,
+    # so A's room fits with margin. Cooler than A because the professional
+    # register wants the same event announced the same way twice, not variety.
+    CallType.ANNOUNCEMENT: CallShape(max_tokens=1500, temperature=0.4),
     # The `--ask` smoke test. Room to say something, not room to ramble.
     CallType.PROBE: CallShape(max_tokens=300, temperature=0.7),
 }

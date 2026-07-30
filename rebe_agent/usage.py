@@ -42,6 +42,11 @@ class CallType(StrEnum):
     RELEVANCE_GATE = "relevance_gate"
     """D: borderline news candidate, keep or drop."""
 
+    ANNOUNCEMENT = "announcement"
+    """E: a high-tier post rewritten in the professional register for the
+    Announcements channel. Rare by construction - at most one per high-tier
+    item that actually posted."""
+
     PROBE = "probe"
     """The `--ask` smoke test. Its own row, so it never muddies the four real
     call types, but counted toward the day's ceiling like everything else - a

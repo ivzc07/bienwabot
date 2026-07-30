@@ -92,6 +92,15 @@ Then the post goes out through the shared pacer, and only after that is the item
 `--limit N` caps how many items one run may post; the default is one, and the pacer's post-to-post gap governs the spacing regardless.
 Running the command again immediately posts nothing, because every candidate is already known.
 
+## The announcement twin
+
+When a high-tier item posts to the group, `rebe_agent/announce.py` also posts it to the bien.mx Community's Announcements channel, restated by one extra DeepSeek call in a professional register - formal Spanish, no slang, zero emoji - with the link appended by the code as always.
+The rule lives in `NewsLeg.post_one`, so every path that posts a big story announces it: a drawn slot, the breaking override, the overnight drain, `--post-news`.
+The twin leaves through the same shared pacer as its own send kind: it spends the raw ceilings and obeys the overnight hold and `/pausa`, but skips the post-to-post gap and is invisible to the ramp clamp and the practical stop - it is the same story in another room, not a second story.
+One try, and every failure is a logged nothing: by then the group post has landed, and the next big item brings the next chance.
+`REBE_ANNOUNCE_JID` names the channel; unset means the leg is off, and Rebe's number must be a community admin to post there.
+The decisions and their reasons are [`docs/wayfinder/announcements-spec.md`](docs/wayfinder/announcements-spec.md).
+
 ## The webhook leg
 
 `rebe_agent/webhook.py` and `rebe_agent/reply.py` are the other trigger: somebody in the group says her name, and she answers.

@@ -45,6 +45,12 @@ class SendKind(StrEnum):
     REPLY = "reply"
     """The webhook leg: an answer to somebody in the group. May fire overnight."""
 
+    ANNOUNCEMENT = "announcement"
+    """The professional-register twin of a high-tier post, into the Announcements
+    channel. Counts toward every raw ceiling and obeys the overnight hold, but is
+    exempt from the post-to-post gap and invisible to the ramp clamp and the
+    practical stop - it is the same story in another room, not a second story."""
+
 
 def fingerprint(text: str) -> str:
     """A stable hash of the *wording*, ignoring whitespace and case.

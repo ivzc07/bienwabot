@@ -25,6 +25,7 @@ import uvicorn
 from psycopg_pool import PoolTimeout
 
 from rebe_agent import __version__
+from rebe_agent.announce import Announcer
 from rebe_agent.brain import BrainError, Probe, build_brain
 from rebe_agent.breaking import Breaking
 from rebe_agent.cadence import Cadence, dense_cadence
@@ -346,10 +347,18 @@ def build_news_stack(
         ramp=ops.ramp,
     )
 
+    brain = build_brain(settings, clock, usage, ops.alerts)
+    # The same brain and the same pacer as the posts the twins follow: the
+    # announcement leg exists only when the operator names a channel for it.
+    announcer = (
+        Announcer(brain, pacer, settings.rebe_announce_jid)
+        if settings.rebe_announce_jid is not None
+        else None
+    )
     # One `Filters` for both halves: the fetch asks each source for exactly
     # what the curator would have kept, rather than for its own idea of it.
     leg = NewsLeg(
-        build_brain(settings, clock, usage, ops.alerts),
+        brain,
         pacer,
         WebCandidates(web, filters=DEFAULT_FILTERS),
         posted,
@@ -358,6 +367,7 @@ def build_news_stack(
         # The same web client the feeds use: the lookup is one more bounded GET,
         # and a second client would be a second set of connections to tune.
         preview=partial(preview_image_url, web),
+        announcer=announcer,
     )
     return NewsStack(
         leg=leg,
