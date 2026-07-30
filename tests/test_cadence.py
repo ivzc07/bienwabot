@@ -87,9 +87,7 @@ def test_a_thirty_minute_dense_day_fills_wake_to_quiet() -> None:
 
     assert len(plan.slots) == 30
     assert cadence.daily_stop == 30
-    assert all(
-        later.at - earlier.at >= cadence.gap[0] for earlier, later in pairwise(plan.slots)
-    )
+    assert all(later.at - earlier.at >= cadence.gap[0] for earlier, later in pairwise(plan.slots))
 
 
 @pytest.mark.parametrize("day", [SATURDAY, SUNDAY])
