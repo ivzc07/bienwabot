@@ -79,6 +79,15 @@ class Settings(BaseModel):
     kuma_push_url: SecretStr = Field(alias="KUMA_PUSH_URL")
     timezone: str = Field(default=DEFAULT_TIMEZONE, alias="TZ")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    cadence_slot_minutes: int | None = Field(
+        default=None,
+        alias="CADENCE_SLOT_MINUTES",
+        description=(
+            "Experimental dense posting. When set (e.g. 30), the day is cut into "
+            "fixed slots of that many minutes from 08:00-23:00 instead of the "
+            "shipped 4/2 windows. Leave unset for normal cadence."
+        ),
+    )
 
     @field_validator("evolution_api_url", "deepseek_base_url")
     @classmethod
@@ -127,6 +136,16 @@ class Settings(BaseModel):
         if level not in LOG_LEVELS:
             raise ValueError(f"must be one of {', '.join(LOG_LEVELS)}, got {value!r}")
         return level
+
+    @field_validator("cadence_slot_minutes")
+    @classmethod
+    def _check_slot_minutes(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        # Bounds match rebe_agent.cadence - kept here so a bad env dies at boot.
+        if value < 15 or value > 180:
+            raise ValueError("must be between 15 and 180 minutes, or unset")
+        return value
 
     @property
     def zone(self) -> ZoneInfo:

@@ -198,6 +198,20 @@ class Envelope:
         return HOUR / self.sends_per_hour
 
 
+def dense_envelope(slot_minutes: int) -> Envelope:
+    """Match the pacer's post-to-post gap to a dense cadence experiment.
+
+    Hourly and daily ceilings stay at the roomy conversation values; only the
+    news-post gap shrinks, otherwise a 30-minute slot would draw and then be
+    refused for another 45 minutes.
+    """
+    # Keep under (slot - fire window): see dense_cadence. A higher floor would
+    # refuse posts the scheduler already committed to.
+    floor = max(slot_minutes - 5, 1)
+    low = max(floor - 5, 1)
+    return Envelope(post_gap=(timedelta(minutes=low), timedelta(minutes=floor)))
+
+
 @dataclass(frozen=True, slots=True)
 class TypingProfile:
     """How long Rebe appears to type, and how that pause is drawn.

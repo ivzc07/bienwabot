@@ -21,9 +21,11 @@ from rebe_agent.cadence import (
     WEEKEND_WINDOWS,
     Cadence,
     PostWindow,
+    dense_cadence,
     draw_plan,
     jittered_gap,
     moment_on,
+    slot_windows,
 )
 from tests.support import MEXICO_CITY
 
@@ -70,6 +72,24 @@ def test_a_weekday_draws_one_time_in_each_of_the_four_windows() -> None:
 
     assert [slot.window for slot in plan.slots] == ["morning", "midday", "evening", "late"]
     assert plan.day == WEDNESDAY
+
+
+def test_a_thirty_minute_dense_day_fills_wake_to_quiet() -> None:
+    """The volume experiment: one short firing window every half hour."""
+    windows = slot_windows(30)
+    assert windows[0].opens == WAKING_OPENS
+    assert windows[0].closes == time(8, 5)
+    assert windows[1].opens == time(8, 30)
+    assert len(windows) == 30  # 08:00, 08:30, ... 22:30
+
+    cadence = dense_cadence(30)
+    plan = draw_plan(WEDNESDAY, zone=MEXICO_CITY, rng=random.Random(SEED), cadence=cadence)
+
+    assert len(plan.slots) == 30
+    assert cadence.daily_stop == 30
+    assert all(
+        later.at - earlier.at >= cadence.gap[0] for earlier, later in pairwise(plan.slots)
+    )
 
 
 @pytest.mark.parametrize("day", [SATURDAY, SUNDAY])
