@@ -69,7 +69,10 @@ jobs:
           grep -E '^[A-Z][A-Z0-9_]*=' .env.example \
             | sed -e 's/^\([A-Z][A-Z0-9_]*\)=$/\1=ci-placeholder/' \
                   -e 's/CHANGE_ME/ci-placeholder/' \
+            | grep -v '^CADENCE_SLOT_MINUTES=' \
             > .env.ci
+          # Optional int: a blank in .env.example must not become the string
+          # placeholder the sed above writes for secrets, or boot rejects it.
           cat .env.ci
       - name: Boot with a complete environment
         run: |
