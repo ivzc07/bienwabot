@@ -1,0 +1,38 @@
+{
+  "event": "messages.upsert",
+  "instance": "bien-rebe",
+  "data": {
+    "key": {
+      "remoteJid": "120363000000000000@g.us",
+      "fromMe": false,
+      "id": "3EB0A1B2C3D4E5F60009",
+      "participant": "164561806217420@lid",
+      "addressingMode": "lid",
+      "participantAlt": "5215559876543@s.whatsapp.net"
+    },
+    "pushName": "Ana",
+    "messageType": "conversation",
+    "message": {
+      "conversation": "@30306094551155",
+      "messageContextInfo": {
+        "threadId": [],
+        "messageSecret": "c3R1Yi1tZXNzYWdlLXNlY3JldC1ub3QtYS1yZWFsLWtleQ=="
+      }
+    },
+    "messageTimestamp": 1785002400,
+    "instanceId": "b1a7f0f2-0000-4000-8000-000000000001",
+    "source": "ios",
+    "contextInfo": {
+      "mentionedJid": [
+        "30306094551155@lid"
+      ],
+      "groupMentions": [],
+      "statusAttributions": []
+    }
+  },
+  "destination": "http://rebe-agent:8000/webhook/webhook-secret-test",
+  "date_time": "2026-07-25T12:00:00.000Z",
+  "sender": "5215551234567@s.whatsapp.net",
+  "server_url": "http://bien-evo:8080",
+  "apikey": "evo-key-test"
+}
